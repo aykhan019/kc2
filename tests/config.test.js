@@ -78,14 +78,12 @@ test('loadConfig picks up token and overrides via env.sh (NPM_C2_ENV_FILE)', () 
   delete process.env.NPM_C2_REGISTRY_URL;
   delete process.env.NPM_C2_PACKAGE_NAME;
   delete process.env.NPM_C2_MAX_FILE_BYTES;
-  delete process.env.NPM_C2_TRANSFER_ROOT;
   const file = writeEnvFile(
     [
       'NPM_C2_TOKEN=npm_from_env_file',
       'NPM_C2_REGISTRY_URL=https://registry.npmjs.org',
       'NPM_C2_PACKAGE_NAME=@someone/disttag-lab-test',
       'NPM_C2_MAX_FILE_BYTES=4096',
-      'NPM_C2_TRANSFER_ROOT=lab-files',
     ].join('\n'),
   );
   process.env.NPM_C2_ENV_FILE = file;
@@ -94,19 +92,14 @@ test('loadConfig picks up token and overrides via env.sh (NPM_C2_ENV_FILE)', () 
   assert.equal(cfg.registryUrl, 'https://registry.npmjs.org');
   assert.equal(cfg.packageName, '@someone/disttag-lab-test');
   assert.equal(cfg.maxFileBytes, 4096);
-  assert.equal(cfg.transferRoot, 'lab-files');
   delete process.env.NPM_C2_ENV_FILE;
 });
 
 test('loadConfig rejects invalid file transfer settings', () => {
   delete process.env.NPM_C2_MAX_FILE_BYTES;
-  delete process.env.NPM_C2_TRANSFER_ROOT;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-configtest-'));
   const config = path.join(dir, 'config.json');
 
   fs.writeFileSync(config, JSON.stringify({ maxFileBytes: 0 }));
   assert.throws(() => loadConfig(config), /maxFileBytes must be a positive number/);
-
-  fs.writeFileSync(config, JSON.stringify({ transferRoot: '' }));
-  assert.throws(() => loadConfig(config), /transferRoot must be a non-empty string/);
 });

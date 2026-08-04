@@ -6,13 +6,13 @@ inspired by the npm-c2 research. Built for understanding C2 channel design and
 **defender detection** — not for offensive use.
 
 > **Scope / ethics**: the victim agent executes only hard-coded mock tasks
-> (`echo`, `sysinfo`, `ping`, `time`, `whoami`, `getfile`). There is **no**
-> arbitrary command execution, persistence, privilege escalation, obfuscation,
-> or encryption. `getfile` is limited to a configured victim-side transfer
-> directory and a small size cap. Payloads are deliberately plain base64 so
-> every artifact is readable and analyzable. The default registry is a
-> **local** verdaccio container. Do not point this at packages or accounts you
-> do not own.
+> (`echo`, `sysinfo`, `ping`, `time`, `whoami`, `getfile`, `pwd`, `cd`, `ls`,
+> `stat`, `hash`). There is **no** arbitrary command execution, persistence,
+> privilege escalation, obfuscation, or encryption. `getfile` reads a single
+> file (absolute path, or relative to the agent's cwd) under a small size
+> cap. Payloads are deliberately plain base64 so every artifact is readable
+> and analyzable. The default registry is a **local** verdaccio container.
+> Do not point this at packages or accounts you do not own.
 
 ## Architecture
 
@@ -25,6 +25,7 @@ inspired by the npm-c2 research. Built for understanding C2 channel design and
           │ latest -> 1.0.0       │
           │ x-cmd-* -> command    │
           │ x-res-* -> result     │
+          │ x-ann-* -> announce   │
           └───────────────────────┘
                  ▲           ▲
                  │           │
@@ -66,15 +67,20 @@ docker compose -f docker/docker-compose.yml run --rm attacker
 In the CLI:
 
 ```
-npm-c2> task all ping          # broadcast a command
-npm-c2> task all whoami        # report mock identity details
-npm-c2> task all getfile demo.png  # fetch transfer/demo.png from the victim
-npm-c2> watch 3                # poll for results every 3s (Ctrl-C to stop)
-npm-c2> agents                 # list agents that have reported
-npm-c2> stats                  # local counters
-npm-c2> clean                  # delete all x-cmd-*/x-res-* tags
+npm-c2> task all ping              # broadcast a command
+npm-c2> task all whoami            # report mock identity details
+npm-c2> task all pwd               # where is the agent?
+npm-c2> task all ls /tmp           # list a directory on the victim
+npm-c2> task all getfile /etc/hosts  # fetch a file (absolute or cwd-relative)
+npm-c2> agents                     # list agents (joins also print live)
+npm-c2> history 10                 # last 10 requests/responses
+npm-c2> stats                      # local counters
+npm-c2> clean                      # delete all x-cmd-*/x-res-*/x-ann-* tags
 npm-c2> exit
 ```
+
+The CLI polls in the background while you type: agent joins and task
+completions/failures print as live notifications — no `watch` needed.
 
 Tear down:
 
@@ -141,32 +147,41 @@ Real environment variables always win over `env.sh` values. Use
 | `logFile` / `NPM_C2_LOG_FILE` | append-only log file (`""` disables) | `logs/lab.log` |
 | `stateFile` / `NPM_C2_STATE_FILE` | state file path (role default if empty) | `""` |
 | `maxFileBytes` / `NPM_C2_MAX_FILE_BYTES` | max bytes returned by `getfile` | `32768` |
-| `transferRoot` / `NPM_C2_TRANSFER_ROOT` | victim-side directory `getfile` may read from | `transfer` |
 | — / `NPM_C2_TOKEN` | registry bearer token (**env / `env.sh` only, never `config.json`**) | — |
 | — / `NPM_C2_ENV_FILE` | explicit env.sh path | `./env.sh` |
 | — / `NPM_C2_CONFIG` | explicit config file path | `./config.json` |
 | — / `NPM_C2_LOG_LEVEL` | `debug`/`info`/`warn`/`error` | `info` |
 
 State files: `victim-state.json` (agent id + last processed seq per target),
-`attacker-state.json` (next seq per target, seen results, stats). Delete them
-to reset a side.
+`attacker-state.json` (next seq per target, seen results, agent info, request/
+response history, stats). Delete them to reset a side.
 
 ## Attacker CLI reference
 
 | Command | Description |
 |---|---|
-| `agents` | list agent ids seen in result tags |
-| `task <agentId\|all> <op> [args...]` | publish a command tag (ops: `echo`, `sysinfo`, `ping`, `time`, `whoami`, `getfile`) |
+| `agents` | list agents seen, with last-seen time, host, and cwd |
+| `task <agentId\|all> <op> [args...]` | publish a command tag |
+| `history [n]` | show the last n requests/responses (default 20, persisted) |
 | `poll` | fetch & decode new result tags once |
-| `watch [intervalSec]` | poll continuously until Ctrl-C |
-| `clean` | delete all `x-cmd-*`/`x-res-*` tags (leaves only `latest`) |
+| `clean` | delete all `x-cmd-*`/`x-res-*`/`x-ann-*` tags (leaves only `latest`) |
 | `stats` | local counters: sent, received, per-agent |
 | `help`, `exit` | — |
 
+Ops without arguments: `echo <text>`, `sysinfo`, `ping`, `time`, `whoami`,
+`pwd`. Ops taking a path: `getfile`, `cd`, `stat`, `hash` — the path is
+**absolute, or relative to the agent's current working directory** (use `pwd`
+to see it and `cd` to change it). `ls [path]` lists a directory (default: the
+agent's cwd).
+
+While the prompt is idle, the CLI polls in the background (every
+`min(pollIntervalSec, 5)`s) and prints live notifications when an agent
+joins (`x-ann-*` announce tag published by the victim at startup) and when a
+task completes or fails.
+
 `getfile` transfers bytes, so small images and short video samples work the
-same way as text files. Stage them under the victim's `transferRoot` and use a
-relative path, for example `task all getfile sample.png`. The attacker saves
-reassembled downloads under `downloads/`.
+same way as text files. The attacker saves reassembled downloads under
+`downloads/`.
 
 ## Development
 

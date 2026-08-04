@@ -18,8 +18,9 @@ at an existing version. So:
 ## Tag grammar
 
 ```abnf
-command-tag = "x-cmd-" agent-id "-" seq "-" b64payload
-result-tag  = "x-res-" agent-id "-" seq "-" chunk "of" total "-" b64chunk
+command-tag  = "x-cmd-" agent-id "-" seq "-" b64payload
+result-tag   = "x-res-" agent-id "-" seq "-" chunk "of" total "-" b64chunk
+announce-tag = "x-ann-" agent-id "-" b64payload
 
 agent-id    = 1*64( ALPHA / DIGIT / "_" )    ; no "-" allowed
 seq         = 1*DIGIT                        ; positive integer, per-target
@@ -33,13 +34,14 @@ Examples:
 x-cmd-a1b2c3d4-7-eyJvcCI6InBpbmcifQ -> 1.0.0
 x-res-a1b2c3d4-7-1of2-eyJzZXEiOjcsIm9rIjp0cnVlLCJvdXRwdXQiOiJwb -> 1.0.0
 x-res-a1b2c3d4-7-2of2-25nIn0 -> 1.0.0
+x-ann-a1b2c3d4-eyJ0cyI6MTcyMDAwMDAwMDAwMH0 -> 1.0.0
 ```
 
 ### Fields
 
 - **`x-` sentinel prefix** — npm rejects dist-tags that parse as a semver
   range. Starting every tag with `x-` makes that impossible, and makes lab
-  tags trivially greppable and cleanable (`x-cmd-*`, `x-res-*`).
+  tags trivially greppable and cleanable (`x-cmd-*`, `x-res-*`, `x-ann-*`).
 - **`agent-id`** — target agent id in command tags, or the literal `all` for
   broadcast. In result tags it is the *responding* agent's id. Restricted to
   `[A-Za-z0-9_]` so the `-`-separated grammar stays unambiguous even though
@@ -62,18 +64,20 @@ x-res-a1b2c3d4-7-2of2-25nIn0 -> 1.0.0
 Command payload (JSON):
 
 ```json
-{ "op": "echo|sysinfo|ping|time|whoami|getfile", "args": { "text": "...", "path": "..." }, "ts": 1720000000000 }
+{ "op": "echo|sysinfo|ping|time|whoami|getfile|pwd|cd|ls|stat|hash", "args": { "text": "...", "path": "..." }, "ts": 1720000000000 }
 ```
 
 `op` is restricted to the victim's hard-coded mock allowlist
-(`echo`, `sysinfo`, `ping`, `time`, `whoami`, `getfile`). Anything else is
-answered with `ok: false`. `getfile` reads one file from the victim-side
-`transferRoot` (`transfer/` by default), enforces `maxFileBytes` (default
-32 KiB), and returns it as base64 in the result payload's optional `file`
-field (`{ name, size, dataB64 }`). Relative paths are resolved under
-`transferRoot`; absolute paths and symlinks are accepted only if their resolved
-target stays inside `transferRoot`. The attacker CLI reassembles the result and
-saves it under `downloads/`.
+(`echo`, `sysinfo`, `ping`, `time`, `whoami`, `getfile`, `pwd`, `cd`, `ls`,
+`stat`, `hash`). Anything else is answered with `ok: false`. Path-taking ops
+(`getfile`, `cd`, `stat`, `hash`, and optionally `ls`) accept an **absolute
+path, or a path relative to the agent's current working directory**; `cd`
+changes that cwd for subsequent tasks, `pwd` reports it. `getfile` enforces
+`maxFileBytes` (default 32 KiB) and returns the file as base64 in the result
+payload's optional `file` field (`{ name, size, dataB64 }`). `hash` returns
+the SHA-256 of a file (read-only, capped at 64 MiB); `ls` output is truncated
+at 200 entries. The attacker CLI reassembles `getfile` results and saves them
+under `downloads/`.
 
 Result payload (JSON):
 
@@ -84,8 +88,21 @@ Result payload (JSON):
 `getfile` result payloads add a file object:
 
 ```json
-{ "seq": 8, "op": "getfile", "ok": true, "output": "sample.png (1024 bytes)", "file": { "name": "sample.png", "size": 1024, "dataB64": "..." }, "ts": 1720000002000 }
+{ "seq": 8, "op": "getfile", "ok": true, "output": "/etc/hosts (1024 bytes)", "file": { "name": "hosts", "size": 1024, "dataB64": "..." }, "ts": 1720000002000 }
 ```
+
+## Announce tags (agent join)
+
+At startup the victim publishes one **announce tag** so the attacker CLI can
+show a live "agent joined" notification even before any task runs:
+
+```json
+{ "ts": 1720000000000, "cwd": "/home/lab", "host": "vm1" }
+```
+
+Announce tags carry no `seq` — they are published once per process start and
+are idempotent on the attacker side (a known agent id is not re-notified).
+They are removed by `clean` like every other lab tag.
 
 ## Size limit and chunking
 
@@ -117,22 +134,24 @@ npm caps dist-tag names at **214 characters**. The encoder enforces this:
 ```
 attacker                       registry (dist-tags)                    victim
    |                                  |                                  |
+   |                                  |<-- PUT x-ann-<me>-... =1.0.0 ----|  (startup announce)
    |-- PUT x-cmd-<t>-<n>-... =1.0.0 ->|                                  |
    |                                  |<- GET dist-tags (poll) ----------|
    |                                  |---------- {..., x-cmd-...} ----->|
    |                                  |                     decode, seq>n?
    |                                  |                     execute mock task
    |                                  |<- PUT x-res-<me>-<n>-<i>of<k>-...|
-   |-- GET dist-tags (poll/watch) --->|                                  |
+   |-- GET dist-tags (background poll) >|                                  |
    |<--------- {..., x-res-...} ------|                                  |
    | reassemble chunks, display       |                                  |
    |                                  |                                  |
-   |-- DELETE x-cmd-* / x-res-* ----->|   (clean: only "latest" remains)  |
+   |-- DELETE x-cmd-* / x-res-* / x-ann-* >|   (clean: only "latest" remains)  |
 ```
 
 ## Cleanup
 
-The attacker's `clean` command deletes **all** tags matching `x-cmd-*` or
-`x-res-*` via authenticated `DELETE /-/package/<pkg>/dist-tags/<tag>`,
-leaving only the package's ordinary tags (e.g. `latest`). Neither side ever
-deletes or modifies package *versions*.
+The attacker's `clean` command deletes **all** tags matching `x-cmd-*`,
+`x-res-*`, or `x-ann-*` via authenticated
+`DELETE /-/package/<pkg>/dist-tags/<tag>`, leaving only the package's
+ordinary tags (e.g. `latest`). Neither side ever deletes or modifies package
+*versions*.

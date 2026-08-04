@@ -5,12 +5,15 @@ import {
   PINNED_VERSION,
   ProtocolError,
   assertValidTagName,
+  decodeAnnounceTag,
   decodeCommandTag,
   decodePayload,
   decodeResultTag,
+  encodeAnnounceTag,
   encodeCommandTag,
   encodePayload,
   encodeResultTags,
+  isAnnounceTag,
   isCommandTag,
   isLabTag,
   isResultTag,
@@ -142,9 +145,27 @@ test('malformed result tags throw ProtocolError', () => {
 test('tag classification helpers', () => {
   const cmd = encodeCommandTag(AGENT, 1, { op: 'ping' });
   const res = encodeResultTags(AGENT, 1, { ok: true, output: 'pong' })[0];
+  const ann = encodeAnnounceTag(AGENT, { ts: 1 });
   assert.ok(isCommandTag(cmd) && !isCommandTag(res) && !isCommandTag('latest'));
   assert.ok(isResultTag(res) && !isResultTag(cmd) && !isResultTag('latest'));
-  assert.ok(isLabTag(cmd) && isLabTag(res) && !isLabTag('latest') && !isLabTag('beta'));
+  assert.ok(isAnnounceTag(ann) && !isAnnounceTag(cmd) && !isAnnounceTag(res));
+  assert.ok(isLabTag(cmd) && isLabTag(res) && isLabTag(ann));
+  assert.ok(!isLabTag('latest') && !isLabTag('beta'));
+});
+
+test('announce tag round-trip', () => {
+  const payload = { ts: 1720000000000, cwd: '/tmp/lab', host: 'vm1' };
+  const tag = encodeAnnounceTag(AGENT, payload);
+  assert.ok(tag.length <= MAX_TAG_LEN);
+  const decoded = decodeAnnounceTag(tag);
+  assert.equal(decoded.agentId, AGENT);
+  assert.deepEqual(decoded.payload, payload);
+});
+
+test('malformed announce tags throw ProtocolError', () => {
+  assert.throws(() => decodeAnnounceTag('x-ann-broken'), ProtocolError); // too few fields
+  assert.throws(() => decodeAnnounceTag('x-ann-a b-Zm9v'), ProtocolError); // bad agentId
+  assert.throws(() => decodeAnnounceTag('x-cmd-a1-1-Zm9v'), ProtocolError); // wrong prefix
 });
 
 test('assertValidTagName enforces npm constraints', () => {
