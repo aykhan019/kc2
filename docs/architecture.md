@@ -20,7 +20,7 @@
         | attacker CLI  |     |  victim agent  |
         | (operator)    |     |  (compromised  |
         | task/poll/    |     |   endpoint,    |
-        | watch/clean   |     |   polls & runs |
+        | history/clean |     |   polls & runs |
         +---------------+     |   mock tasks)  |
                               +----------------+
 ```
@@ -39,8 +39,8 @@ reads are anonymous; only writes need a token.
 | config loader | `src/common/config.js` | defaults < config file < env overrides; token only from env |
 | logger | `src/common/logger.js` | leveled, timestamped, colored on TTY, optional log file |
 | victim agent | `src/victim/agent.js` | poll loop, state file, dedup, backoff, graceful shutdown |
-| mock tasks | `src/victim/tasks.js` | hard-coded allowlist: `echo`, `sysinfo`, `ping`, `time` |
-| attacker CLI | `src/attacker/cli.js` | interactive REPL: `agents task poll watch clean stats` |
+| mock tasks | `src/victim/tasks.js` | hard-coded allowlist: `echo`, `sysinfo`, `ping`, `time`, `whoami`, `getfile`, `pwd`, `cd`, `ls`, `stat`, `hash` |
+| attacker CLI | `src/attacker/cli.js` | interactive REPL with live notifications: `agents task history poll clean stats` |
 
 ## Why dist-tags work as a channel (and versions don't)
 

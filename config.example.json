@@ -5,6 +5,5 @@
   "agentId": "",
   "logFile": "logs/lab.log",
   "stateFile": "",
-  "maxFileBytes": 32768,
-  "transferRoot": "transfer"
+  "maxFileBytes": 32768
 }

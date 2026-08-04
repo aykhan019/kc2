@@ -11,7 +11,7 @@ However, because dist-tags are designed for semver environment aliases (e.g. `la
 ## Indicators of Compromise (IoCs)
 
 ### 1. Registry & Metadata Artifacts
-- **Non-semver Tag Names**: Package dist-tags beginning with sentinels like `x-cmd-` or `x-res-`, or containing high-entropy base64url strings.
+- **Non-semver Tag Names**: Package dist-tags beginning with sentinels like `x-cmd-`, `x-res-`, or `x-ann-`, or containing high-entropy base64url strings.
 - **Single-Version Tag Churn**: Packages with a single immutable version (e.g. `1.0.0`) exhibiting high counts of added, modified, or deleted dist-tags without any corresponding `tarball` publishes or version increments.
 - **Chunked Tag Multiplicity**: Presence of dist-tag names containing chunk index patterns such as `1of2`, `2of2`, `1of3`.
 
@@ -32,7 +32,7 @@ However, because dist-tags are designed for semver environment aliases (e.g. `la
 - **Logic**: Monitor registry audit logs or API telemetry for `PUT` and `DELETE` requests targeting `/-/package/<pkg>/dist-tags/*`. Alert when the ratio of dist-tag modification events to package version publish events exceeds threshold (e.g., > 10 tag updates per version).
 
 ### Detection 2: Non-semver Tag Name Pattern Analysis
-- **Logic**: Standard npm dist-tags follow simple identifiers (`latest`, `canary`, `v1.x`, `dev`). Tag names containing base64url character sets, hyphen-delimited sequence numbers, or sentinel prefixes (`x-cmd-`, `x-res-`) should trigger detection alerts.
+- **Logic**: Standard npm dist-tags follow simple identifiers (`latest`, `canary`, `v1.x`, `dev`). Tag names containing base64url character sets, hyphen-delimited sequence numbers, or sentinel prefixes (`x-cmd-`, `x-res-`, `x-ann-`) should trigger detection alerts.
 
 ### Detection 3: Polling Beacon Detection (Network Flow)
 - **Logic**: Compute time delta between consecutive `GET /-/package/<pkg>/dist-tags` requests per source IP. A low variance in request intervals (e.g. polling every 5.0 seconds ± 0.2s) indicates automated C2 beaconing.
@@ -98,6 +98,11 @@ level: high
 ^x-res-[A-Za-z0-9_]{1,64}-[0-9]+-[0-9]+of[0-9]+-[A-Za-z0-9_-]+$
 ```
 
+#### Announce Tag Pattern (`x-ann-<agentId>-<base64url>`)
+```regex
+^x-ann-[A-Za-z0-9_]{1,64}-[A-Za-z0-9_-]+$
+```
+
 ### YARA Rule (Memory / Log / Network Packet Scanning)
 ```yara
 rule Suspicious_npm_dist_tag_C2 {
@@ -108,6 +113,7 @@ rule Suspicious_npm_dist_tag_C2 {
     strings:
         $cmd_tag = /x-cmd-[A-Za-z0-9_]{1,64}-[0-9]+-[A-Za-z0-9_-]{10,}/
         $res_tag = /x-res-[A-Za-z0-9_]{1,64}-[0-9]+-[0-9]+of[0-9]+-[A-Za-z0-9_-]{10,}/
+        $ann_tag = /x-ann-[A-Za-z0-9_]{1,64}-[A-Za-z0-9_-]{10,}/
     condition:
         any of them
 }

