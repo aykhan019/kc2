@@ -9,13 +9,18 @@
 # attacker and victim would have independently obtained write access to the
 # same package (e.g. via a leaked token) — see docs/architecture.md.
 set -eu
+umask 077
 
 REGISTRY_URL="${REGISTRY_URL:-http://registry:4873}"
 SHARED_DIR="${SHARED_DIR:-/shared}"
 USER_NAME="${LAB_USER:-lab}"
-USER_PASS="${LAB_PASS:-lab-password-123}"
+USER_PASS="${LAB_PASS:-}"
 USER_EMAIL="${LAB_EMAIL:-lab@example.com}"
 PKG_NAME="${PKG_NAME:-my-package}"
+
+if [ -z "$USER_PASS" ]; then
+  USER_PASS="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(24).toString("base64url"))')"
+fi
 
 echo "[setup] waiting for registry at ${REGISTRY_URL} ..."
 tries=0

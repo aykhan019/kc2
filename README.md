@@ -67,10 +67,13 @@ docker compose -f docker/docker-compose.yml up -d registry setup victim
 docker compose -f docker/docker-compose.yml run --rm attacker
 ```
 
+The registry port is bound to loopback only. Setup generates a random lab
+password when `LAB_PASS` is not supplied.
+
 In the CLI:
 
 ```
-npm-c2> task all ping              # broadcast a command
+npm-c2> task all ping              # fan out to every currently online agent
 npm-c2> task all whoami            # report mock identity details
 npm-c2> task all pwd               # where is the agent?
 npm-c2> task all ls /tmp           # list a directory on the victim
@@ -135,11 +138,13 @@ into your shell history, and both `npm run victim` and `npm run attacker`
 pick it up no matter which terminal they run in:
 
 ```sh
-cp env.sh.example env.sh   # then edit env.sh and fill in your values
+cp env.sh.example env.sh
+chmod 600 env.sh           # required; then edit and fill in your values
 ```
 
 Real environment variables always win over `env.sh` values. Use
-`NPM_C2_ENV_FILE=/path/to/file` to load a different file.
+`NPM_C2_ENV_FILE=/path/to/file` to load a different file. On POSIX systems,
+group- or world-readable env files are refused.
 
 | Key / env var | Meaning | Default |
 |---|---|---|
@@ -163,8 +168,8 @@ response history, stats). Delete them to reset a side.
 
 | Command | Description |
 |---|---|
-| `agents` | list agents seen, with last-seen time, host, and cwd |
-| `task <agentId\|all> <op> [args...]` | publish a command tag |
+| `agents` | list agents with online/offline/unknown presence, last observed heartbeat, host, and cwd |
+| `task <agentId\|all> <op> [args...]` | task one online agent or fan out to all online agents |
 | `history [n]` | show the last n requests/responses (default 20, persisted) |
 | `poll` | fetch new results; show locally pending direct tasks while waiting |
 | `clean` | delete all `x-cmd-*`/`x-res-*`/`x-ann-*` tags (leaves only `latest`) |
@@ -172,7 +177,7 @@ response history, stats). Delete them to reset a side.
 | `help`, `exit` | — |
 
 Ops without arguments: `echo <text>`, `ping`, `time`, `sysinfo`, `whoami`,
-`env` (secrets redacted), `netinfo`, `ps`, `df`, `pwd`. Ops
+`env` (names listed, all values redacted), `netinfo`, `ps`, `df`, `pwd`. Ops
 taking a path: `cd`, `stat`, `hash`, `getfile` — the path is **absolute, or
 relative to the agent's current working directory** (use `pwd` to see it and
 `cd` to change it). `ls [path]` lists a directory (default: the agent's cwd)
@@ -189,8 +194,17 @@ the required browser, speech, notification, or audio utility is unavailable.
 
 While the prompt is idle, the CLI polls in the background (every
 `min(pollIntervalSec, 5)`s) and prints live notifications when an agent
-joins (`x-ann-*` announce tag published by the victim at startup) and when a
-task completes or fails.
+joins and when a task completes or fails. Victims refresh an `x-ann-*`
+heartbeat every `max(30 seconds, pollIntervalSec)`. Three missed heartbeat
+windows mark an agent offline. Presence uses the attacker's local observation
+time, so clock skew on a victim cannot keep it online or mark it offline early.
+An agent is `unknown` while the first heartbeat change is pending, after a
+registry refresh failure, or after `clean`; direct tasks require `online`.
+Heartbeat publication runs independently of result uploads so large transfers
+do not suppress presence updates.
+Direct commands carry a recent heartbeat lease and are rejected after that
+lease rolls out of the agent's four-heartbeat window, without comparing clocks
+between machines. The attacker also removes command tags after four windows.
 
 `getfile` transfers bytes, so small images and short video samples work the
 same way as text files. The attacker saves reassembled downloads under

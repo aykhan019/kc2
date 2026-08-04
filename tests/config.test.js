@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadEnvFile, loadConfig } from '../src/common/config.js';
+import { channelTimings, loadEnvFile, loadConfig } from '../src/common/config.js';
 
 // Keys these tests touch in process.env — always restored afterwards.
 const TOUCHED = [
@@ -17,6 +17,7 @@ const TOUCHED = [
   'NPM_C2_TEST_PLAIN',
   'NPM_C2_TEST_QUOTED',
   'NPM_C2_TEST_EXPORT',
+  'NPM_C2_TEST_UNSAFE',
 ];
 const saved = new Map();
 after(() => {
@@ -33,7 +34,7 @@ for (const k of TOUCHED) {
 function writeEnvFile(contents) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-envtest-'));
   const file = path.join(dir, 'env.sh');
-  fs.writeFileSync(file, contents);
+  fs.writeFileSync(file, contents, { mode: 0o600 });
   return file;
 }
 
@@ -70,6 +71,29 @@ test('real environment variables win over env.sh', () => {
 
 test('missing env file is not an error', () => {
   assert.equal(loadEnvFile('/nonexistent/path/env.sh'), null);
+});
+
+test('env file must not be readable by group or other users', {
+  skip: process.platform === 'win32',
+}, () => {
+  const file = writeEnvFile('NPM_C2_TEST_UNSAFE=unsafe\n');
+  fs.chmodSync(file, 0o644);
+
+  assert.throws(() => loadEnvFile(file), /chmod 600/);
+  assert.equal(process.env.NPM_C2_TEST_UNSAFE, undefined);
+});
+
+test('channel timings scale from the poll interval', () => {
+  assert.deepEqual(channelTimings(10), {
+    heartbeatMs: 30_000,
+    offlineMs: 90_000,
+    taskTtlMs: 120_000,
+  });
+  assert.deepEqual(channelTimings(60), {
+    heartbeatMs: 60_000,
+    offlineMs: 180_000,
+    taskTtlMs: 240_000,
+  });
 });
 
 test('loadConfig picks up token and overrides via env.sh (NPM_C2_ENV_FILE)', () => {

@@ -73,6 +73,12 @@ test('invalid seq values are rejected on encode', () => {
   }
 });
 
+test('unsafe command sequence values are rejected on decode', () => {
+  const valid = encodeCommandTag(AGENT, 1, { op: 'ping' });
+  const unsafe = valid.replace(`-${AGENT}-1-`, `-${AGENT}-999999999999999999999-`);
+  assert.throws(() => decodeCommandTag(unsafe), /positive safe integer/);
+});
+
 test('malformed command tags throw ProtocolError', () => {
   assert.throws(() => decodeCommandTag('latest'), ProtocolError);
   assert.throws(() => decodeCommandTag('x-cmd-'), ProtocolError);
@@ -119,6 +125,16 @@ test('result chunks reassemble regardless of order', () => {
   const tags = encodeResultTags(AGENT, 2, payload);
   const parts = tags.map(decodeResultTag).reverse();
   assert.deepEqual(reassembleResult(parts), payload);
+});
+
+test('result payload sequence must match its validated tag sequence', () => {
+  const forged = encodeResultTags(AGENT, 7, {
+    seq: 'x/../../../../tmp/overwrite',
+    ok: true,
+    output: 'forged',
+  }).map(decodeResultTag);
+
+  assert.throws(() => reassembleResult(forged), /sequence mismatch/);
 });
 
 test('incomplete or inconsistent chunks are rejected', () => {

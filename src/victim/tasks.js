@@ -20,8 +20,6 @@ export const PS_MAX_LINES = 40;
 export const FIND_MAX_RESULTS = 100;
 export const FIND_MAX_DEPTH = 6;
 
-// Env vars whose names look secret never leave the victim machine.
-const SECRET_KEY_RE = /token|secret|passw|key|cred|auth/i;
 const WINDOWS_PS_SCRIPT = `
 $total=[double](Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory;
 '    PID    PPID  %CPU  %MEM COMMAND';
@@ -116,13 +114,9 @@ const TASKS = {
     return process.cwd();
   },
 
-  /** Environment variables with secret-looking values redacted. */
+  /** Environment variable inventory; values never leave the victim. */
   env() {
-    const lines = [];
-    for (const key of Object.keys(process.env).sort()) {
-      const value = SECRET_KEY_RE.test(key) ? '<redacted>' : process.env[key];
-      lines.push(`${key}=${value}`);
-    }
+    const lines = Object.keys(process.env).sort().map((key) => `${key}=<redacted>`);
     return lines.join('\n') || '(empty environment)';
   },
 

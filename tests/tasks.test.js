@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { runTask, ALLOWED_OPS } from '../src/victim/tasks.js';
+import { runTask, ALLOWED_OPS, FIND_MAX_RESULTS, HASH_MAX_BYTES } from '../src/victim/tasks.js';
 import { OP_DEFS } from '../src/common/ops.js';
 
 function tmpFile(contents, name = 'sample.txt') {
@@ -124,22 +124,36 @@ test('hash returns the sha256 of a file', () => {
   assert.match(r.output, new RegExp(`sha256 ${expected}`));
 });
 
+test('hash rejects files above the size cap', () => {
+  const { file } = tmpFile('');
+  fs.truncateSync(file, HASH_MAX_BYTES + 1); // sparse file: no real I/O
+  const r = runTask('hash', { path: file });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /too large to hash/);
+});
+
 // ---------------------------------------------------------------------------
 // env / netinfo / ps / df / find
 // ---------------------------------------------------------------------------
 
-test('env lists variables but redacts secret-looking keys', () => {
+test('env lists variable names but never exposes values', () => {
   process.env.NPM_C2_TEST_VISIBLE = 'visible-value';
   process.env.NPM_C2_TEST_API_TOKEN = 'super-secret';
+  process.env.DATABASE_URL = 'postgres://admin:password@example.test/db';
+  process.env.SESSION_COOKIE = 'session-value';
   try {
     const r = runTask('env');
     assert.equal(r.ok, true);
-    assert.match(r.output, /NPM_C2_TEST_VISIBLE=visible-value/);
+    assert.match(r.output, /NPM_C2_TEST_VISIBLE=<redacted>/);
     assert.match(r.output, /NPM_C2_TEST_API_TOKEN=<redacted>/);
-    assert.doesNotMatch(r.output, /super-secret/);
+    assert.match(r.output, /DATABASE_URL=<redacted>/);
+    assert.match(r.output, /SESSION_COOKIE=<redacted>/);
+    assert.doesNotMatch(r.output, /visible-value|super-secret|postgres:\/\/|session-value/);
   } finally {
     delete process.env.NPM_C2_TEST_VISIBLE;
     delete process.env.NPM_C2_TEST_API_TOKEN;
+    delete process.env.DATABASE_URL;
+    delete process.env.SESSION_COOKIE;
   }
 });
 
@@ -184,6 +198,16 @@ test('find validates its arguments', () => {
   const r2 = runTask('find', { path: '/tmp' });
   assert.equal(r2.ok, false);
   assert.match(r2.error, /requires a name query/);
+});
+
+test('find truncates results at the cap', () => {
+  const { dir } = tmpFile('x');
+  for (let i = 0; i < FIND_MAX_RESULTS + 1; i++) {
+    fs.writeFileSync(path.join(dir, `match-${String(i).padStart(3, '0')}.txt`), 'x');
+  }
+  const r = runTask('find', { path: dir, query: 'match-' });
+  assert.equal(r.ok, true);
+  assert.match(r.output, new RegExp(`${FIND_MAX_RESULTS}\\+ match`));
 });
 
 // ---------------------------------------------------------------------------

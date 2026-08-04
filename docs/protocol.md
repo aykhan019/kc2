@@ -64,7 +64,7 @@ x-ann-a1b2c3d4-eyJ0cyI6MTcyMDAwMDAwMDAwMH0 -> 1.0.0
 Command payload (JSON):
 
 ```json
-{ "op": "<24 ops, see src/common/ops.js>", "args": { "text": "...", "path": "...", "url": "..." }, "ts": 1720000000000 }
+{ "op": "<24 ops, see src/common/ops.js>", "args": { "text": "...", "path": "...", "url": "..." }, "ts": 1720000000000, "lease": "a1b2c3d4e5f6" }
 ```
 
 `op` is restricted to the victim's hard-coded mock allowlist (defined with
@@ -78,8 +78,8 @@ current working directory**; `cd` changes that cwd for subsequent tasks,
 returns the file as base64 in the result payload's optional `file` field
 (`{ name, size, dataB64 }`). `hash` returns the SHA-256 of a file (read-only,
 capped at 64 MiB); `ls` is truncated at 200 entries, `find` at 100 matches
-and depth 6, `ps` at 40 rows; `ps`/`df` are unix-only; `env` redacts values
-whose keys look secret. The attacker CLI reassembles `getfile` results and
+and depth 6, `ps` at 40 rows; `ps`/`df` are unix-only; `env` lists names but
+redacts every value. The attacker CLI reassembles `getfile` results and
 saves them under `downloads/`.
 
 Result payload (JSON):
@@ -94,18 +94,29 @@ Result payload (JSON):
 { "seq": 8, "op": "getfile", "ok": true, "output": "/etc/hosts (1024 bytes)", "file": { "name": "hosts", "size": 1024, "dataB64": "..." }, "ts": 1720000002000 }
 ```
 
-## Announce tags (agent join)
+## Announce tags (agent heartbeat)
 
-At startup the victim publishes one **announce tag** so the attacker CLI can
-show a live "agent joined" notification even before any task runs:
+The victim publishes a rolling **announce tag** so the attacker CLI can show
+agent presence even before any task runs:
 
 ```json
-{ "ts": 1720000000000, "cwd": "/home/lab", "host": "vm1" }
+{ "ts": 1720000000000, "lease": "a1b2c3d4e5f6", "cwd": "/home/lab", "host": "vm1" }
 ```
 
-Announce tags carry no `seq` — they are published once per process start and
-are idempotent on the attacker side (a known agent id is not re-notified).
-They are removed by `clean` like every other lab tag.
+Announce tags carry no `seq`. A victim publishes a replacement heartbeat every
+`max(30 seconds, pollIntervalSec)`, then removes its older announce tag. The
+attacker records when it observes a distinct heartbeat tag using its own clock;
+the payload `ts` is metadata only. Re-reading the same persistent tag does not
+refresh presence. The attacker reports `unknown` until it observes a heartbeat
+change, whenever registry freshness cannot be verified, and after `clean`.
+Three missed heartbeat windows then mark the agent offline. Heartbeats run on
+an independent async schedule while command results are uploaded.
+Each heartbeat also carries a short random lease. Direct commands echo the
+latest observed lease; the victim accepts its four most recent leases. This
+expires stale direct commands using heartbeat progression rather than comparing
+wall clocks. If optional `cwd`/`host` metadata would exceed npm's tag limit, it
+is shortened or omitted while `ts` and `lease` are retained.
+Announce tags are also removed by `clean` like every other lab tag.
 
 ## Size limit and chunking
 
@@ -131,13 +142,21 @@ npm caps dist-tag names at **214 characters**. The encoder enforces this:
   at-most-once execution is preferred over at-least-once delivery.
 - Malformed tags are logged and skipped on both sides; they never abort a
   poll cycle.
+- Direct commands with a lease older than the victim's four-heartbeat window
+  advance sequence state but are never executed, preventing delayed execution
+  after reconnect without relying on synchronized clocks. The attacker also
+  removes command tags older than four windows using its own local clock.
+- A victim deletes a processed direct command tag after publishing its result.
+  The CLI implements `task all` as leased direct-command fan-out. Legacy
+  `x-cmd-all-*` tags remain decodable for protocol inspection but the runtime
+  rejects them because they cannot carry a safe per-agent lease.
 
 ## State machine (per command)
 
 ```
 attacker                       registry (dist-tags)                    victim
    |                                  |                                  |
-   |                                  |<-- PUT x-ann-<me>-... =1.0.0 ----|  (startup announce)
+   |                                  |<-- PUT x-ann-<me>-... =1.0.0 ----|  (rolling heartbeat)
    |-- PUT x-cmd-<t>-<n>-... =1.0.0 ->|                                  |
    |                                  |<- GET dist-tags (poll) ----------|
    |                                  |---------- {..., x-cmd-...} ----->|

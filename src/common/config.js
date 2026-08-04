@@ -19,6 +19,15 @@ export const DEFAULTS = {
   token: '', // only ever populated from the NPM_C2_TOKEN env var
 };
 
+export function channelTimings(pollIntervalSec) {
+  const heartbeatMs = Math.max(30_000, Number(pollIntervalSec) * 1_000);
+  return {
+    heartbeatMs,
+    offlineMs: heartbeatMs * 3,
+    taskTtlMs: heartbeatMs * 4,
+  };
+}
+
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
@@ -36,6 +45,9 @@ export function loadEnvFile(envPath) {
       ? path.resolve(process.env.NPM_C2_ENV_FILE)
       : path.resolve('env.sh');
   if (!fs.existsSync(file)) return null;
+  if (process.platform !== 'win32' && (fs.statSync(file).mode & 0o077) !== 0) {
+    throw new Error(`env file must be private; run: chmod 600 "${file}"`);
+  }
 
   const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
   for (const raw of lines) {

@@ -5,6 +5,16 @@ import { styleText } from 'node:util';
 
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 const COLORS = { debug: 'gray', info: 'cyan', warn: 'yellow', error: 'red' };
+const ANSI_CSI_RE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/g;
+
+function sanitize(value) {
+  return String(value).replace(ANSI_CSI_RE, '').replace(CONTROL_RE, (character) => {
+    if (character === '\n') return '\\n';
+    if (character === '\t') return '\\t';
+    return '';
+  });
+}
 
 /**
  * @param {object} opts
@@ -25,9 +35,9 @@ export function createLogger({ level = 'info', logFile = '', tty = process.stdou
   function write(lvl, msg, meta) {
     if (LEVELS[lvl] < min) return;
     const ts = new Date().toISOString();
-    let line = `[${ts}] [${lvl.toUpperCase().padEnd(5)}] ${msg}`;
+    let line = `[${ts}] [${lvl.toUpperCase().padEnd(5)}] ${sanitize(msg)}`;
     if (meta !== undefined) {
-      line += ' ' + (typeof meta === 'string' ? meta : JSON.stringify(meta));
+      line += ' ' + (typeof meta === 'string' ? sanitize(meta) : JSON.stringify(meta));
     }
     if (toConsole) {
       const out = tty ? styleText(COLORS[lvl], line) : line;
