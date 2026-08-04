@@ -166,7 +166,7 @@ response history, stats). Delete them to reset a side.
 | `agents` | list agents seen, with last-seen time, host, and cwd |
 | `task <agentId\|all> <op> [args...]` | publish a command tag |
 | `history [n]` | show the last n requests/responses (default 20, persisted) |
-| `poll` | fetch & decode new result tags once |
+| `poll` | fetch new results; show locally pending direct tasks while waiting |
 | `clean` | delete all `x-cmd-*`/`x-res-*`/`x-ann-*` tags (leaves only `latest`) |
 | `stats` | local counters: sent, received, per-agent |
 | `help`, `exit` | — |

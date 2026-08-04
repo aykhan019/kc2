@@ -12,6 +12,7 @@ import {
   selectCommands,
 } from '../src/victim/agent.js';
 import { encodeCommandTag, TASK_OPS } from '../src/common/protocol.js';
+import { pendingDirectTasks } from '../src/attacker/cli.js';
 
 const AGENT = 'a1b2c3d4';
 
@@ -225,4 +226,17 @@ test('state file round-trip and corruption resilience', () => {
   assert.deepEqual(loadState(p), s);
   fs.writeFileSync(p, 'not json {');
   assert.deepEqual(loadState(p), defaultState(), 'corrupt state file falls back to defaults');
+});
+
+test('pending direct tasks are derived from local request/response history', () => {
+  const history = [
+    { dir: 'out', target: 'agent1', seq: 3, op: 'pwd', ts: 1000 },
+    { dir: 'out', target: 'agent2', seq: 4, op: 'ping', ts: 2000 },
+    { dir: 'out', target: 'agent1', seq: 5, op: 'pwd', ts: 2500 },
+    { dir: 'out', target: 'all', seq: 5, op: 'ping', ts: 3000 },
+    { dir: 'in', agentId: 'agent2', seq: 4, op: 'ping', ts: 4000 },
+    { dir: 'in', agentId: 'agent1', seq: 5, op: 'ping', ts: 5000 },
+  ];
+
+  assert.deepEqual(pendingDirectTasks(history), [history[0], history[2]]);
 });

@@ -10,7 +10,7 @@
 //   task <agentId|all> <op> [args...]   publish a command tag
 //                         (op allowlist: src/common/ops.js)
 //   history [n]                 show the last n requests/responses (default 20)
-//   poll                        one-shot fetch & decode of new result tags
+//   poll                        fetch results or show locally pending direct tasks
 //   clean                       delete all lab tags (x-cmd-*/x-res-*/x-ann-*)
 //   stats                       local counters: commands sent, results received
 //   help                        show help
@@ -20,6 +20,7 @@ import readline from 'node:readline/promises';
 import fs from 'node:fs';
 import path from 'node:path';
 import { styleText } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import { loadConfig, configArgFromArgv } from '../common/config.js';
 import { createLogger } from '../common/logger.js';
 import {
@@ -94,6 +95,21 @@ function pushHistory(state, entry) {
   if (state.history.length > HISTORY_MAX) {
     state.history.splice(0, state.history.length - HISTORY_MAX);
   }
+}
+
+/** Direct requests without a matching locally recorded response. */
+export function pendingDirectTasks(history) {
+  const completed = new Set(
+    history
+      .filter((entry) => entry.dir === 'in')
+      .map((entry) => `${entry.agentId}:${entry.seq}:${entry.op}`),
+  );
+  return history.filter(
+    (entry) =>
+      entry.dir === 'out' &&
+      entry.target !== 'all' &&
+      !completed.has(`${entry.target}:${entry.seq}:${entry.op}`),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -228,14 +244,14 @@ async function main() {
   });
 
   /** Print a live notification without eating the line the user is typing. */
-  function notify(line) {
+  function notify(line, redraw = true) {
     console.log(line);
-    rl.prompt(true);
+    if (redraw) rl.prompt(true);
   }
 
   // --- shared helpers -------------------------------------------------------
 
-  function noteAgent(agentId, info = {}) {
+  function noteAgent(agentId, info = {}, redraw = true) {
     const isNew = !state.agents.includes(agentId);
     if (isNew) state.agents.push(agentId);
     const prev = state.agentInfo[agentId] ?? {};
@@ -247,26 +263,26 @@ async function main() {
     if (isNew) {
       const { host, cwd } = state.agentInfo[agentId];
       const detail = [host && `host=${host}`, cwd && `cwd=${cwd}`].filter(Boolean).join(' ');
-      notify(`[${ts()}] ${c('green', '[+] agent joined:')} ${c('bold', agentId)}${detail ? ` (${detail})` : ''}`);
+      notify(`[${ts()}] ${c('green', '[+] agent joined:')} ${c('bold', agentId)}${detail ? ` (${detail})` : ''}`, redraw);
     }
   }
 
-  function printResult(agentId, r) {
+  function printResult(agentId, r, redraw = true) {
     const head = `[${ts()}] ${c('magenta', agentId)} #${r.seq} ${r.op ?? '?'}`;
     if (!r.ok) {
-      notify(`${head} ${c('red', 'FAILED')}: ${r.error}`);
+      notify(`${head} ${c('red', 'FAILED')}: ${r.error}`, redraw);
       return;
     }
     if (r.file && typeof r.file.dataB64 === 'string') {
       try {
         const out = saveDownload(agentId, r);
-        notify(`${head} ${c('green', 'done')}: ${r.output} -> saved to ${c('bold', out)}`);
+        notify(`${head} ${c('green', 'done')}: ${r.output} -> saved to ${c('bold', out)}`, redraw);
       } catch (err) {
-        notify(`${head} ${c('red', 'error')}: received file but failed to save: ${err.message}`);
+        notify(`${head} ${c('red', 'error')}: received file but failed to save: ${err.message}`, redraw);
       }
       return;
     }
-    notify(`${head} ${c('green', 'done')}: ${r.output}`);
+    notify(`${head} ${c('green', 'done')}: ${r.output}`, redraw);
   }
 
   function recordResult(agentId, r) {
@@ -287,8 +303,21 @@ async function main() {
 
   let pollInFlight = false;
 
-  async function pollOnce({ quiet = false } = {}) {
-    if (pollInFlight) return 0; // background tick overlapping a manual poll
+  function printPendingTasks() {
+    for (const task of pendingDirectTasks(state.history).slice(-5)) {
+      const ageSec = Math.max(0, Math.floor((Date.now() - task.ts) / 1000));
+      console.log(c('yellow', `pending: ${task.target} #${task.seq} ${task.op} (${ageSec}s)`));
+    }
+  }
+
+  async function pollOnce({ quiet = false, redraw = false } = {}) {
+    if (pollInFlight) {
+      if (!quiet) {
+        console.log('no new results');
+        printPendingTasks();
+      }
+      return 0;
+    }
     pollInFlight = true;
     try {
       const tags = await client.getDistTags();
@@ -301,7 +330,7 @@ async function main() {
               ts: ann.payload.ts,
               host: ann.payload.host,
               cwd: ann.payload.cwd,
-            });
+            }, redraw);
           } catch (err) {
             logger.warn(`skipping malformed announce tag "${name}": ${err.message}`);
           }
@@ -318,20 +347,20 @@ async function main() {
         const key = `${part.agentId}:${part.seq}`;
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(part);
-        noteAgent(part.agentId);
+        noteAgent(part.agentId, {}, redraw);
       }
       let fresh = 0;
       for (const [key, parts] of groups) {
         if (state.seenResults.includes(key)) continue;
         const total = parts[0].total;
         if (new Set(parts.map((p) => p.chunk)).size !== total) {
-          if (!quiet) notify(c('yellow', `${key}: waiting for chunks (${new Set(parts.map((p) => p.chunk)).size}/${total})`));
+          if (!quiet) notify(c('yellow', `${key}: waiting for chunks (${new Set(parts.map((p) => p.chunk)).size}/${total})`), redraw);
           continue;
         }
         try {
           const result = reassembleResult(parts);
           const a = parts[0].agentId;
-          printResult(a, result);
+          printResult(a, result, redraw);
           recordResult(a, result);
           state.seenResults.push(key);
           state.received++;
@@ -343,7 +372,8 @@ async function main() {
       }
       save();
       if (!quiet) {
-        notify(fresh === 0 ? 'no new results' : `${fresh} new result(s)`);
+        console.log(fresh === 0 ? 'no new results' : `${fresh} new result(s)`);
+        if (fresh === 0) printPendingTasks();
       }
       return fresh;
     } finally {
@@ -370,7 +400,7 @@ async function main() {
         ['task <agentId|all> <op> [args]', 'publish a command tag'],
         ['agents', 'list agents seen (last-seen, host, cwd)'],
         ['history [n]', 'last n requests/responses (default 20)'],
-        ['poll', 'fetch & decode new result tags once'],
+        ['poll', 'fetch results or show locally pending direct tasks'],
         ['clean', 'delete all x-cmd-* / x-res-* / x-ann-* tags'],
         ['stats', 'local counters: sent, received, per-agent'],
         ['help', 'this help'],
@@ -496,7 +526,7 @@ async function main() {
   const timer = setInterval(async () => {
     if (rlClosed) return;
     try {
-      await pollOnce({ quiet: true });
+      await pollOnce({ quiet: true, redraw: true });
     } catch (err) {
       notify(c('yellow', `[${ts()}] background poll failed: ${err.message}`));
     }
@@ -551,7 +581,9 @@ async function main() {
   });
 }
 
-main().catch((err) => {
-  console.error(`fatal: ${err.message}`);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(`fatal: ${err.message}`);
+    process.exit(1);
+  });
+}
