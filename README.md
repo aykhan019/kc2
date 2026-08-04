@@ -206,6 +206,16 @@ Direct commands carry a recent heartbeat lease and are rejected after that
 lease rolls out of the agent's four-heartbeat window, without comparing clocks
 between machines. The attacker also removes command tags after four windows.
 
+To disconnect a victim, press Ctrl-C once: the agent deletes its own announce
+tag, saves state, and exits (a second Ctrl-C force-exits and skips the
+deletion, e.g. when the registry is unreachable). The attacker does not flip
+the agent to `offline` immediately — presence is timeout-based on the
+attacker's local clock, so a stopped agent (graceful or killed) goes `offline`
+after three missed heartbeat windows (~90 s at the default 30 s heartbeat,
+plus up to one poll interval). Registry read caching means a deleted tag is
+not guaranteed visible to the attacker's very next poll, which is why tag
+disappearance is not treated as an instant offline signal.
+
 `getfile` transfers bytes, so small images and short video samples work the
 same way as text files. The attacker saves reassembled downloads under
 `downloads/`.
