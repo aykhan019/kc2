@@ -40,7 +40,8 @@ reads are anonymous; only writes need a token.
 | config loader | `src/common/config.js` | defaults < config file < env overrides; token only from env |
 | logger | `src/common/logger.js` | leveled, timestamped, colored on TTY, optional log file |
 | victim agent | `src/victim/agent.js` | poll loop, state file, dedup, backoff, graceful shutdown |
-| mock tasks | `src/victim/tasks.js` | read-mostly handlers for the 16-op allowlist |
+| mock tasks | `src/victim/tasks.js` | handlers for the 24-op allowlist |
+| fun desktop ops | `src/victim/fun.js` | validated macOS/Linux/Windows browser, speech, notification, sound, attention, and volume adapters |
 | attacker CLI | `src/attacker/cli.js` | interactive REPL with live notifications: `agents task history poll clean stats` |
 
 ## Why dist-tags work as a channel (and versions don't)

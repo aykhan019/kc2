@@ -118,6 +118,29 @@ function parseTaskLine(line) {
     case 'text':
       args.text = rest.join(' ');
       break;
+    case 'text!':
+      args.text = rest.join(' ');
+      if (!args.text) throw new Error(`usage: task <agentId|all> ${def.usage}`);
+      break;
+    case 'url': {
+      args.url = rest.join(' ');
+      let parsed;
+      try {
+        parsed = new URL(args.url);
+      } catch {
+        throw new Error(`usage: task <agentId|all> ${def.usage} (http(s):// only)`);
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error('openurl accepts http(s):// URLs only');
+      }
+      break;
+    }
+    case 'volume':
+      args.level = Number(rest[0]);
+      if (rest.length !== 1 || !Number.isInteger(args.level) || args.level < 0 || args.level > 100) {
+        throw new Error(`usage: task <agentId|all> ${def.usage}`);
+      }
+      break;
     case 'path':
       args.path = rest.join(' ');
       if (!args.path) throw new Error(`usage: task <agentId|all> ${def.usage}${pathHint}`);
@@ -353,15 +376,19 @@ async function main() {
         ['help', 'this help'],
         ['exit', 'save state and quit'],
       ];
-      const opRows = OP_DEFS.map((o) => [o.usage, o.summary]);
+      const opRows = OP_DEFS.filter((o) => o.group !== 'fun').map((o) => [o.usage, o.summary]);
+      const funRows = OP_DEFS.filter((o) => o.group === 'fun').map((o) => [o.usage, o.summary]);
       console.log(
         [
           '',
           section('  COMMANDS'),
           table(commandRows),
           '',
-          section(`  TASK OPS (${OP_DEFS.length})   ${dim('task <agentId|all> <op> [args]')}`),
+          section(`  TASK OPS (${opRows.length})   ${dim('task <agentId|all> <op> [args]')}`),
           table(opRows),
+          '',
+          section(`  FUN OPS (${funRows.length})`),
+          table(funRows),
           '',
           dim('  path args are absolute or relative to the agent cwd (see pwd/cd).'),
           dim('  agent joins and task results print as live notifications.'),

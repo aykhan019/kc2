@@ -6,9 +6,10 @@ inspired by the npm-c2 research. Built for understanding C2 channel design and
 **defender detection** — not for offensive use.
 
 > **Scope / ethics**: the victim agent executes only hard-coded mock tasks
-> (16 read-mostly ops — see `src/common/ops.js`: `echo`, `ping`, `time`,
+> (24 allowlisted ops — see `src/common/ops.js`: `echo`, `ping`, `time`,
 > `sysinfo`, `whoami`, `env`, `netinfo`, `ps`, `df`, `pwd`, `cd`, `ls`,
-> `stat`, `find`, `hash`, `getfile`). There is **no** arbitrary command
+> `stat`, `find`, `hash`, `getfile`, plus eight visible/audible `fun` ops).
+> There is **no** arbitrary command
 > execution, persistence, privilege escalation, obfuscation, or encryption.
 > `getfile` reads a single file (absolute path, or relative to the agent's
 > cwd) under a small size cap. Payloads are deliberately plain base64 so
@@ -171,14 +172,20 @@ response history, stats). Delete them to reset a side.
 | `help`, `exit` | — |
 
 Ops without arguments: `echo <text>`, `ping`, `time`, `sysinfo`, `whoami`,
-`env` (secrets redacted), `netinfo`, `ps` (unix), `df` (unix), `pwd`. Ops
+`env` (secrets redacted), `netinfo`, `ps`, `df`, `pwd`. Ops
 taking a path: `cd`, `stat`, `hash`, `getfile` — the path is **absolute, or
 relative to the agent's current working directory** (use `pwd` to see it and
 `cd` to change it). `ls [path]` lists a directory (default: the agent's cwd)
 and `find <dir> <text>` searches file names recursively. The allowlist is
 data-driven: `src/common/ops.js` holds each op's name, usage, argument spec,
-and help summary — adding an op is one entry there plus one handler in
-`src/victim/tasks.js`.
+and help summary — adding an op is one entry there plus one handler under
+`src/victim/`.
+
+Fun ops are shown in their own CLI help section: `openurl <http(s)-url>`,
+`say <text>`, `notify <text>`, `beep`, `bounce`, `volume <0-100>`, `rickroll`,
+and `party`. They use built-in macOS/Windows facilities and common Linux
+desktop utilities. Minimal/headless Linux systems report a clear error when
+the required browser, speech, notification, or audio utility is unavailable.
 
 While the prompt is idle, the CLI polls in the background (every
 `min(pollIntervalSec, 5)`s) and prints live notifications when an agent
@@ -199,7 +206,7 @@ Project layout:
 
 ```
 src/common/    protocol.js (codec) · ops.js (task allowlist metadata) · registry.js (HTTP client) · config.js · logger.js
-src/victim/    agent.js (poll loop) · tasks.js (mock op handlers)
+src/victim/    agent.js (poll loop) · tasks.js (core handlers) · fun.js (desktop handlers)
 src/attacker/  cli.js (REPL)
 tests/         node:test unit tests
 docker/        Dockerfile · docker-compose.yml · setup-registry.sh · entrypoint.sh

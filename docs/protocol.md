@@ -64,13 +64,14 @@ x-ann-a1b2c3d4-eyJ0cyI6MTcyMDAwMDAwMDAwMH0 -> 1.0.0
 Command payload (JSON):
 
 ```json
-{ "op": "<16 ops, see src/common/ops.js>", "args": { "text": "...", "path": "...", "query": "..." }, "ts": 1720000000000 }
+{ "op": "<24 ops, see src/common/ops.js>", "args": { "text": "...", "path": "...", "url": "..." }, "ts": 1720000000000 }
 ```
 
 `op` is restricted to the victim's hard-coded mock allowlist (defined with
 usage/argument metadata in `src/common/ops.js`: `echo`, `ping`, `time`,
 `sysinfo`, `whoami`, `env`, `netinfo`, `ps`, `df`, `pwd`, `cd`, `ls`, `stat`,
-`find`, `hash`, `getfile`). Anything else is answered with `ok: false`.
+`find`, `hash`, `getfile`, `openurl`, `say`, `notify`, `beep`, `bounce`,
+`volume`, `rickroll`, `party`). Anything else is answered with `ok: false`.
 Path-taking ops accept an **absolute path, or a path relative to the agent's
 current working directory**; `cd` changes that cwd for subsequent tasks,
 `pwd` reports it. `getfile` enforces `maxFileBytes` (default 32 KiB) and

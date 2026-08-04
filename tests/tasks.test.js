@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { runTask, ALLOWED_OPS } from '../src/victim/tasks.js';
+import { OP_DEFS } from '../src/common/ops.js';
 
 function tmpFile(contents, name = 'sample.txt') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-tasks-'));
@@ -19,9 +20,17 @@ test('allowlist contains exactly the documented ops', () => {
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
     [
-      'cd', 'df', 'echo', 'env', 'find', 'getfile', 'hash', 'ls',
-      'netinfo', 'ping', 'ps', 'pwd', 'stat', 'sysinfo', 'time', 'whoami',
+      'beep', 'bounce', 'cd', 'df', 'echo', 'env', 'find', 'getfile', 'hash', 'ls',
+      'netinfo', 'notify', 'openurl', 'party', 'ping', 'ps', 'pwd', 'rickroll',
+      'say', 'stat', 'sysinfo', 'time', 'volume', 'whoami',
     ],
+  );
+});
+
+test('fun ops are categorized for help output', () => {
+  assert.deepEqual(
+    OP_DEFS.filter((op) => op.group === 'fun').map((op) => op.name),
+    ['openurl', 'say', 'notify', 'beep', 'bounce', 'volume', 'rickroll', 'party'],
   );
 });
 
@@ -140,14 +149,14 @@ test('netinfo lists at least one interface address', () => {
   assert.match(r.output, /127\.0\.0\.1|::1|IPv4|IPv6/);
 });
 
-test('ps lists processes (unix only)', { skip: process.platform === 'win32' }, () => {
+test('ps lists processes through the native Unix adapter', { skip: process.platform === 'win32' }, () => {
   const r = runTask('ps');
   assert.equal(r.ok, true);
   assert.match(r.output, /PID\s+PPID\s+%CPU\s+%MEM/);
   assert.match(r.output, /\n\s*\d+\s+\d+\s+[\d.]+\s+[\d.]+ /); // at least one process row
 });
 
-test('df reports filesystem usage (unix only)', { skip: process.platform === 'win32' }, () => {
+test('df reports filesystem usage through the native Unix adapter', { skip: process.platform === 'win32' }, () => {
   const r = runTask('df');
   assert.equal(r.ok, true);
   assert.match(r.output, /Filesystem/);
@@ -221,4 +230,128 @@ test('getfile rejects directories', () => {
   const r = runTask('getfile', { path: dir });
   assert.equal(r.ok, false);
   assert.match(r.error, /not a regular file/);
+});
+
+// ---------------------------------------------------------------------------
+// fun desktop ops (all effects use a fake process runner)
+// ---------------------------------------------------------------------------
+
+function fakeRuntime(platform, fail = new Set()) {
+  const calls = [];
+  const bells = [];
+  return {
+    platform,
+    calls,
+    bells,
+    execFileSync(file, args, options) {
+      calls.push({ file, args, options });
+      if (fail.has(file)) {
+        const err = new Error(`${file} unavailable`);
+        err.code = 'ENOENT';
+        throw err;
+      }
+      return '';
+    },
+    writeBell(value) {
+      bells.push(value);
+    },
+  };
+}
+
+test('ps and df use Windows PowerShell adapters', () => {
+  for (const op of ['ps', 'df']) {
+    const runtime = fakeRuntime('win32');
+    const result = runTask(op, {}, runtime);
+    assert.equal(result.ok, true, result.error ?? '');
+    assert.equal(runtime.calls[0].file, 'powershell.exe');
+  }
+});
+
+test('openurl accepts only http(s) and uses safe per-OS launchers', () => {
+  const expected = {
+    darwin: ['open', ['https://example.com/path?q=1']],
+    linux: ['xdg-open', ['https://example.com/path?q=1']],
+    win32: ['rundll32.exe', ['url.dll,FileProtocolHandler', 'https://example.com/path?q=1']],
+  };
+  for (const [platform, [file, args]] of Object.entries(expected)) {
+    const runtime = fakeRuntime(platform);
+    const result = runTask('openurl', { url: 'https://example.com/path?q=1' }, runtime);
+    assert.equal(result.ok, true);
+    assert.deepEqual([runtime.calls[0].file, runtime.calls[0].args], [file, args]);
+  }
+
+  const runtime = fakeRuntime('darwin');
+  for (const url of ['file:///etc/passwd', 'javascript:alert(1)', 'not-a-url']) {
+    const result = runTask('openurl', { url }, runtime);
+    assert.equal(result.ok, false);
+  }
+  assert.equal(runtime.calls.length, 0);
+});
+
+test('say validates text length and maps to each OS without interpolation', () => {
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    const runtime = fakeRuntime(platform);
+    const result = runTask('say', { text: 'hello; "quoted"' }, runtime);
+    assert.equal(result.ok, true);
+    assert.equal(runtime.calls.length, 1);
+    if (platform === 'darwin') assert.equal(runtime.calls[0].args.at(-1), 'hello; "quoted"');
+    if (platform === 'linux') assert.deepEqual(runtime.calls[0].args, ['hello; "quoted"']);
+    if (platform === 'win32') assert.doesNotMatch(runtime.calls[0].args[4], /hello|quoted/);
+  }
+
+  assert.equal(runTask('say', { text: '' }, fakeRuntime('darwin')).ok, false);
+  assert.equal(runTask('say', { text: 'x'.repeat(201) }, fakeRuntime('darwin')).ok, false);
+});
+
+test('notify, beep, bounce, and volume have implementations for all three OS families', () => {
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    for (const [op, args] of [
+      ['notify', { text: 'hello "quoted"' }],
+      ['beep', {}],
+      ['bounce', {}],
+      ['volume', { level: 42 }],
+    ]) {
+      const runtime = fakeRuntime(platform);
+      const result = runTask(op, args, runtime);
+      assert.equal(result.ok, true, `${platform} ${op}: ${result.error ?? ''}`);
+      assert.ok(runtime.calls.length > 0 || runtime.bells.length > 0, `${platform} ${op} did nothing`);
+    }
+  }
+});
+
+test('volume rejects values outside 0-100', () => {
+  for (const level of [-1, 101, 1.5, 'loud']) {
+    const runtime = fakeRuntime('darwin');
+    assert.equal(runTask('volume', { level }, runtime).ok, false);
+    assert.equal(runtime.calls.length, 0);
+  }
+});
+
+test('Linux desktop utilities use fallbacks without invoking a shell', () => {
+  const sayRuntime = fakeRuntime('linux', new Set(['spd-say']));
+  assert.equal(runTask('say', { text: 'fallback' }, sayRuntime).ok, true);
+  assert.deepEqual(sayRuntime.calls.map((c) => c.file), ['spd-say', 'espeak']);
+
+  const beepRuntime = fakeRuntime('linux', new Set(['paplay', 'canberra-gtk-play', 'beep']));
+  assert.equal(runTask('beep', {}, beepRuntime).ok, true);
+  assert.deepEqual(beepRuntime.bells, ['\u0007']);
+});
+
+test('rickroll raises volume before opening its fixed URL on every OS', () => {
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    const runtime = fakeRuntime(platform);
+    const result = runTask('rickroll', {}, runtime);
+    assert.equal(result.ok, true);
+    const files = runtime.calls.map((c) => c.file);
+    const opener = platform === 'darwin' ? 'open' : platform === 'linux' ? 'xdg-open' : 'rundll32.exe';
+    assert.equal(files.at(-1), opener);
+    assert.match(runtime.calls.at(-1).args.at(-1), /youtube\.com\/watch/);
+  }
+});
+
+test('party combines beep, notification, and URL launch in one task', () => {
+  const runtime = fakeRuntime('darwin');
+  const result = runTask('party', {}, runtime);
+  assert.equal(result.ok, true);
+  assert.deepEqual(runtime.calls.map((c) => c.file), ['afplay', 'osascript', 'open']);
 });
