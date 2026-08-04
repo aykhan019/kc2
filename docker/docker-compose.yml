@@ -1,0 +1,79 @@
+# Lab environment: a local verdaccio registry, one victim agent, one attacker CLI.
+# Usage (from the repo root):
+#   docker compose -f docker/docker-compose.yml up -d registry setup victim
+#   docker compose -f docker/docker-compose.yml run --rm attacker
+name: npm-c2-lab
+
+services:
+  registry:
+    image: verdaccio/verdaccio
+    container_name: npm-c2-registry
+    ports:
+      - "4873:4873"
+    volumes:
+      - registry-storage:/verdaccio/storage
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch("http://localhost:4873/-/ping").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  setup:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: npm-c2-setup
+    entrypoint: ["/app/docker/setup-registry.sh"]
+    environment:
+      REGISTRY_URL: http://registry:4873
+      SHARED_DIR: /shared
+      PKG_NAME: my-package
+    volumes:
+      - shared:/shared
+    depends_on:
+      registry:
+        condition: service_healthy
+
+  victim:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: npm-c2-victim
+    environment:
+      ROLE: victim
+      NPM_C2_REGISTRY_URL: http://registry:4873
+      NPM_C2_PACKAGE_NAME: my-package
+      NPM_C2_POLL_INTERVAL: "5"
+      TOKEN_FILE: /shared/token
+    volumes:
+      - shared:/shared
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+
+  attacker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: npm-c2-attacker
+    environment:
+      ROLE: attacker
+      NPM_C2_REGISTRY_URL: http://registry:4873
+      NPM_C2_PACKAGE_NAME: my-package
+      TOKEN_FILE: /shared/token
+    volumes:
+      - shared:/shared
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    # run interactively: docker compose -f docker/docker-compose.yml run --rm attacker
+    stdin_open: true
+    tty: true
+
+volumes:
+  registry-storage:
+  shared:

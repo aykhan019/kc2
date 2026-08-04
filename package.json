@@ -1,0 +1,24 @@
+{
+  "name": "npm-c2-lab",
+  "version": "1.0.0",
+  "description": "Educational research lab: indirect C2 channel over npm dist-tags (mock tasks only)",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "victim": "node src/victim/agent.js",
+    "attacker": "node src/attacker/cli.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "security-research",
+    "supply-chain",
+    "npm",
+    "dist-tags",
+    "c2",
+    "educational"
+  ]
+}

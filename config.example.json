@@ -1,0 +1,8 @@
+{
+  "registryUrl": "http://localhost:4873",
+  "packageName": "my-package",
+  "pollIntervalSec": 10,
+  "agentId": "",
+  "logFile": "logs/lab.log",
+  "stateFile": ""
+}

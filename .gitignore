@@ -1,0 +1,7 @@
+node_modules/
+logs/
+config.json
+victim-state.json
+attacker-state.json
+*-state.json
+npm-debug.log*

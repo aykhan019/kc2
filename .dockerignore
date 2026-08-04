@@ -1,0 +1,8 @@
+node_modules
+logs
+config.json
+*-state.json
+.git
+docs
+tests
+README.md
