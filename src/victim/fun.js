@@ -4,7 +4,7 @@
 import { execFileSync } from 'node:child_process';
 
 export const MAX_FUN_TEXT = 200;
-export const RICKROLL_URL = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+export const RICKROLL_URL = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&autoplay=1';
 
 const MAC_SOUND = '/System/Library/Sounds/Glass.aiff';
 const EXEC_OPTIONS = Object.freeze({ encoding: 'utf8', stdio: 'ignore', timeout: 15_000, windowsHide: true });
@@ -18,6 +18,7 @@ const PS_NOTIFY = `${PS_DECODE_TEXT} $shell=New-Object -ComObject WScript.Shell;
 const PS_BEEP =
   'Add-Type -AssemblyName System.Windows.Extensions -ErrorAction SilentlyContinue; ' +
   '[System.Media.SystemSounds]::Asterisk.Play(); Start-Sleep -Milliseconds 350;';
+const PS_OPEN_MAXIMIZED = 'Start-Process -FilePath $args[0] -WindowStyle Maximized;';
 const PS_BOUNCE = `
 Add-Type -TypeDefinition @'
 using System;
@@ -30,7 +31,7 @@ public static class LabAttention {
 $handle=[LabAttention]::GetConsoleWindow();
 if ($handle -eq [IntPtr]::Zero) { throw "no interactive console window"; }
 1..6 | ForEach-Object { [LabAttention]::FlashWindow($handle,$true) | Out-Null; Start-Sleep -Milliseconds 150; }`;
-const PS_VOLUME = `
+const PS_VOLUME_API = `
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -41,11 +42,14 @@ public static class LabVolume {
     keybd_event(key,0,2,UIntPtr.Zero);
   }
 }
-'@;
+'@;`;
+const PS_VOLUME = `${PS_VOLUME_API}
 $level=[int]$args[0];
 for ($i=0; $i -lt 50; $i++) { [LabVolume]::Tap(174); };
 $steps=[int][Math]::Ceiling($level/2);
 for ($i=0; $i -lt $steps; $i++) { [LabVolume]::Tap(175); };`;
+const PS_UNMUTE = `${PS_VOLUME_API}
+[LabVolume]::Tap(175);`;
 
 function runtimeFrom(options = {}) {
   return {
@@ -115,6 +119,24 @@ function openUrl(url, runtime) {
   else if (runtime.platform === 'linux') execute(runtime, 'xdg-open', [url]);
   else if (runtime.platform === 'win32') execute(runtime, 'rundll32.exe', ['url.dll,FileProtocolHandler', url]);
   else throw new Error(`openurl is not supported on ${runtime.platform}`);
+}
+
+function openRickroll(runtime) {
+  if (runtime.platform === 'win32') powershell(runtime, PS_OPEN_MAXIMIZED, RICKROLL_URL);
+  else openUrl(RICKROLL_URL, runtime);
+}
+
+function unmute(runtime) {
+  if (runtime.platform === 'darwin') {
+    execute(runtime, 'osascript', ['-e', 'set volume output muted false']);
+  } else if (runtime.platform === 'linux') {
+    executeFirst(runtime, [
+      ['wpctl', ['set-mute', '@DEFAULT_AUDIO_SINK@', '0']],
+      ['pactl', ['set-sink-mute', '@DEFAULT_SINK@', '0']],
+      ['amixer', ['sset', 'Master', 'unmute']],
+    ], 'volume unmute');
+  } else if (runtime.platform === 'win32') powershell(runtime, PS_UNMUTE);
+  else throw new Error(`volume unmute is not supported on ${runtime.platform}`);
 }
 
 function say(text, runtime) {
@@ -213,8 +235,9 @@ export function runFunTask(op, args = {}, options = {}) {
       return `volume set to ${level}`;
     }
     case 'rickroll':
+      unmute(runtime);
       setVolume(100, runtime);
-      openUrl(RICKROLL_URL, runtime);
+      openRickroll(runtime);
       return 'volume set to 100 and rickroll opened';
     case 'party':
       beep(runtime);

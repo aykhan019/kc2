@@ -327,6 +327,15 @@ test('volume rejects values outside 0-100', () => {
   }
 });
 
+test('volume does not force unmute outside rickroll', () => {
+  const mac = fakeRuntime('darwin');
+  const linux = fakeRuntime('linux');
+  runTask('volume', { level: 42 }, mac);
+  runTask('volume', { level: 42 }, linux);
+  assert.equal(mac.calls[0].args.includes('set volume output muted false'), false);
+  assert.equal(linux.calls[0].args[0], 'set-volume');
+});
+
 test('Linux desktop utilities use fallbacks without invoking a shell', () => {
   const sayRuntime = fakeRuntime('linux', new Set(['spd-say']));
   assert.equal(runTask('say', { text: 'fallback' }, sayRuntime).ok, true);
@@ -337,15 +346,25 @@ test('Linux desktop utilities use fallbacks without invoking a shell', () => {
   assert.deepEqual(beepRuntime.bells, ['\u0007']);
 });
 
-test('rickroll raises volume before opening its fixed URL on every OS', () => {
+test('rickroll unmutes, raises volume, and requests best-effort foreground autoplay', () => {
   for (const platform of ['darwin', 'linux', 'win32']) {
     const runtime = fakeRuntime(platform);
     const result = runTask('rickroll', {}, runtime);
     assert.equal(result.ok, true);
     const files = runtime.calls.map((c) => c.file);
-    const opener = platform === 'darwin' ? 'open' : platform === 'linux' ? 'xdg-open' : 'rundll32.exe';
+    const opener = platform === 'darwin' ? 'open' : platform === 'linux' ? 'xdg-open' : 'powershell.exe';
     assert.equal(files.at(-1), opener);
-    assert.match(runtime.calls.at(-1).args.at(-1), /youtube\.com\/watch/);
+    assert.match(runtime.calls.at(-1).args.at(-1), /youtube\.com\/watch.*autoplay=1/);
+
+    if (platform === 'darwin') {
+      assert.deepEqual(runtime.calls[0].args, ['-e', 'set volume output muted false']);
+    } else if (platform === 'linux') {
+      assert.deepEqual(runtime.calls[0].args, ['set-mute', '@DEFAULT_AUDIO_SINK@', '0']);
+    } else {
+      assert.match(runtime.calls[0].args[3], /\[LabVolume\]::Tap\(175\);/);
+      assert.equal(runtime.calls.length, 3);
+      assert.match(runtime.calls.at(-1).args[3], /Start-Process.*WindowStyle Maximized/);
+    }
   }
 });
 
