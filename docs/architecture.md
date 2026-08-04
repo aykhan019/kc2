@@ -35,11 +35,12 @@ reads are anonymous; only writes need a token.
 | Component | Path | Role |
 |---|---|---|
 | protocol codec | `src/common/protocol.js` | encode/decode/chunk/validate tag names |
+| op allowlist | `src/common/ops.js` | data-driven task metadata: name, usage, arg spec, help summary |
 | registry client | `src/common/registry.js` | fetch wrapper over the 3 dist-tag endpoints; timeout, backoff retries, clear 401/404 errors |
 | config loader | `src/common/config.js` | defaults < config file < env overrides; token only from env |
 | logger | `src/common/logger.js` | leveled, timestamped, colored on TTY, optional log file |
 | victim agent | `src/victim/agent.js` | poll loop, state file, dedup, backoff, graceful shutdown |
-| mock tasks | `src/victim/tasks.js` | hard-coded allowlist: `echo`, `sysinfo`, `ping`, `time`, `whoami`, `getfile`, `pwd`, `cd`, `ls`, `stat`, `hash` |
+| mock tasks | `src/victim/tasks.js` | read-mostly handlers for the 16-op allowlist |
 | attacker CLI | `src/attacker/cli.js` | interactive REPL with live notifications: `agents task history poll clean stats` |
 
 ## Why dist-tags work as a channel (and versions don't)

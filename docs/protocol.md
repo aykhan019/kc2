@@ -64,20 +64,22 @@ x-ann-a1b2c3d4-eyJ0cyI6MTcyMDAwMDAwMDAwMH0 -> 1.0.0
 Command payload (JSON):
 
 ```json
-{ "op": "echo|sysinfo|ping|time|whoami|getfile|pwd|cd|ls|stat|hash", "args": { "text": "...", "path": "..." }, "ts": 1720000000000 }
+{ "op": "<16 ops, see src/common/ops.js>", "args": { "text": "...", "path": "...", "query": "..." }, "ts": 1720000000000 }
 ```
 
-`op` is restricted to the victim's hard-coded mock allowlist
-(`echo`, `sysinfo`, `ping`, `time`, `whoami`, `getfile`, `pwd`, `cd`, `ls`,
-`stat`, `hash`). Anything else is answered with `ok: false`. Path-taking ops
-(`getfile`, `cd`, `stat`, `hash`, and optionally `ls`) accept an **absolute
-path, or a path relative to the agent's current working directory**; `cd`
-changes that cwd for subsequent tasks, `pwd` reports it. `getfile` enforces
-`maxFileBytes` (default 32 KiB) and returns the file as base64 in the result
-payload's optional `file` field (`{ name, size, dataB64 }`). `hash` returns
-the SHA-256 of a file (read-only, capped at 64 MiB); `ls` output is truncated
-at 200 entries. The attacker CLI reassembles `getfile` results and saves them
-under `downloads/`.
+`op` is restricted to the victim's hard-coded mock allowlist (defined with
+usage/argument metadata in `src/common/ops.js`: `echo`, `ping`, `time`,
+`sysinfo`, `whoami`, `env`, `netinfo`, `ps`, `df`, `pwd`, `cd`, `ls`, `stat`,
+`find`, `hash`, `getfile`). Anything else is answered with `ok: false`.
+Path-taking ops accept an **absolute path, or a path relative to the agent's
+current working directory**; `cd` changes that cwd for subsequent tasks,
+`pwd` reports it. `getfile` enforces `maxFileBytes` (default 32 KiB) and
+returns the file as base64 in the result payload's optional `file` field
+(`{ name, size, dataB64 }`). `hash` returns the SHA-256 of a file (read-only,
+capped at 64 MiB); `ls` is truncated at 200 entries, `find` at 100 matches
+and depth 6, `ps` at 40 rows; `ps`/`df` are unix-only; `env` redacts values
+whose keys look secret. The attacker CLI reassembles `getfile` results and
+saves them under `downloads/`.
 
 Result payload (JSON):
 

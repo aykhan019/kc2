@@ -19,19 +19,9 @@ export const PINNED_VERSION = '1.0.0';
 export const SENTINEL = 'x-';
 export const MAX_TAG_LEN = 214;
 export const BROADCAST_ID = 'all';
-export const TASK_OPS = [
-  'echo',
-  'sysinfo',
-  'ping',
-  'time',
-  'whoami',
-  'getfile',
-  'pwd',
-  'cd',
-  'ls',
-  'stat',
-  'hash',
-];
+// The op allowlist is defined (with metadata) in ops.js and re-exported here
+// so existing imports of TASK_OPS from the protocol keep working.
+export { TASK_OPS } from './ops.js';
 
 const AGENT_ID_RE = /^[A-Za-z0-9_]{1,64}$/;
 const B64URL_RE = /^[A-Za-z0-9_-]+$/;

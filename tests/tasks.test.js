@@ -18,7 +18,10 @@ function tmpFile(contents, name = 'sample.txt') {
 test('allowlist contains exactly the documented ops', () => {
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
-    ['cd', 'echo', 'getfile', 'hash', 'ls', 'ping', 'pwd', 'stat', 'sysinfo', 'time', 'whoami'],
+    [
+      'cd', 'df', 'echo', 'env', 'find', 'getfile', 'hash', 'ls',
+      'netinfo', 'ping', 'ps', 'pwd', 'stat', 'sysinfo', 'time', 'whoami',
+    ],
   );
 });
 
@@ -110,6 +113,68 @@ test('hash returns the sha256 of a file', () => {
   assert.equal(r.ok, true);
   const expected = crypto.createHash('sha256').update(contents).digest('hex');
   assert.match(r.output, new RegExp(`sha256 ${expected}`));
+});
+
+// ---------------------------------------------------------------------------
+// env / netinfo / ps / df / find
+// ---------------------------------------------------------------------------
+
+test('env lists variables but redacts secret-looking keys', () => {
+  process.env.NPM_C2_TEST_VISIBLE = 'visible-value';
+  process.env.NPM_C2_TEST_API_TOKEN = 'super-secret';
+  try {
+    const r = runTask('env');
+    assert.equal(r.ok, true);
+    assert.match(r.output, /NPM_C2_TEST_VISIBLE=visible-value/);
+    assert.match(r.output, /NPM_C2_TEST_API_TOKEN=<redacted>/);
+    assert.doesNotMatch(r.output, /super-secret/);
+  } finally {
+    delete process.env.NPM_C2_TEST_VISIBLE;
+    delete process.env.NPM_C2_TEST_API_TOKEN;
+  }
+});
+
+test('netinfo lists at least one interface address', () => {
+  const r = runTask('netinfo');
+  assert.equal(r.ok, true);
+  assert.match(r.output, /127\.0\.0\.1|::1|IPv4|IPv6/);
+});
+
+test('ps lists processes (unix only)', { skip: process.platform === 'win32' }, () => {
+  const r = runTask('ps');
+  assert.equal(r.ok, true);
+  assert.match(r.output, /PID\s+PPID\s+%CPU\s+%MEM/);
+  assert.match(r.output, /\n\s*\d+\s+\d+\s+[\d.]+\s+[\d.]+ /); // at least one process row
+});
+
+test('df reports filesystem usage (unix only)', { skip: process.platform === 'win32' }, () => {
+  const r = runTask('df');
+  assert.equal(r.ok, true);
+  assert.match(r.output, /Filesystem/);
+});
+
+test('find locates files by name substring, recursively', () => {
+  const { dir } = tmpFile('needle content\n', 'needle-data.txt');
+  fs.mkdirSync(path.join(dir, 'nested'));
+  fs.writeFileSync(path.join(dir, 'nested', 'another-needle.log'), 'x');
+  fs.writeFileSync(path.join(dir, 'haystack.txt'), 'y');
+
+  const r = runTask('find', { path: dir, query: 'needle' });
+  assert.equal(r.ok, true);
+  assert.match(r.output, /2 match/);
+  assert.match(r.output, /needle-data\.txt/);
+  assert.match(r.output, /another-needle\.log/);
+  assert.doesNotMatch(r.output, /haystack\.txt/);
+});
+
+test('find validates its arguments', () => {
+  const { file } = tmpFile('x');
+  const r = runTask('find', { path: file, query: 'x' });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /not a directory/);
+  const r2 = runTask('find', { path: '/tmp' });
+  assert.equal(r2.ok, false);
+  assert.match(r2.error, /requires a name query/);
 });
 
 // ---------------------------------------------------------------------------

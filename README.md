@@ -6,12 +6,14 @@ inspired by the npm-c2 research. Built for understanding C2 channel design and
 **defender detection** — not for offensive use.
 
 > **Scope / ethics**: the victim agent executes only hard-coded mock tasks
-> (`echo`, `sysinfo`, `ping`, `time`, `whoami`, `getfile`, `pwd`, `cd`, `ls`,
-> `stat`, `hash`). There is **no** arbitrary command execution, persistence,
-> privilege escalation, obfuscation, or encryption. `getfile` reads a single
-> file (absolute path, or relative to the agent's cwd) under a small size
-> cap. Payloads are deliberately plain base64 so every artifact is readable
-> and analyzable. The default registry is a **local** verdaccio container.
+> (16 read-mostly ops — see `src/common/ops.js`: `echo`, `ping`, `time`,
+> `sysinfo`, `whoami`, `env`, `netinfo`, `ps`, `df`, `pwd`, `cd`, `ls`,
+> `stat`, `find`, `hash`, `getfile`). There is **no** arbitrary command
+> execution, persistence, privilege escalation, obfuscation, or encryption.
+> `getfile` reads a single file (absolute path, or relative to the agent's
+> cwd) under a small size cap. Payloads are deliberately plain base64 so
+> every artifact is readable and analyzable. The default registry is a
+> **local** verdaccio container.
 > Do not point this at packages or accounts you do not own.
 
 ## Architecture
@@ -168,11 +170,15 @@ response history, stats). Delete them to reset a side.
 | `stats` | local counters: sent, received, per-agent |
 | `help`, `exit` | — |
 
-Ops without arguments: `echo <text>`, `sysinfo`, `ping`, `time`, `whoami`,
-`pwd`. Ops taking a path: `getfile`, `cd`, `stat`, `hash` — the path is
-**absolute, or relative to the agent's current working directory** (use `pwd`
-to see it and `cd` to change it). `ls [path]` lists a directory (default: the
-agent's cwd).
+Ops without arguments: `echo <text>`, `ping`, `time`, `sysinfo`, `whoami`,
+`env` (secrets redacted), `netinfo`, `ps` (unix), `df` (unix), `pwd`. Ops
+taking a path: `cd`, `stat`, `hash`, `getfile` — the path is **absolute, or
+relative to the agent's current working directory** (use `pwd` to see it and
+`cd` to change it). `ls [path]` lists a directory (default: the agent's cwd)
+and `find <dir> <text>` searches file names recursively. The allowlist is
+data-driven: `src/common/ops.js` holds each op's name, usage, argument spec,
+and help summary — adding an op is one entry there plus one handler in
+`src/victim/tasks.js`.
 
 While the prompt is idle, the CLI polls in the background (every
 `min(pollIntervalSec, 5)`s) and prints live notifications when an agent
@@ -192,8 +198,8 @@ npm test          # node:test unit suite (protocol, registry client, agent)
 Project layout:
 
 ```
-src/common/    protocol.js (codec) · registry.js (HTTP client) · config.js · logger.js
-src/victim/    agent.js (poll loop) · tasks.js (mock allowlist)
+src/common/    protocol.js (codec) · ops.js (task allowlist metadata) · registry.js (HTTP client) · config.js · logger.js
+src/victim/    agent.js (poll loop) · tasks.js (mock op handlers)
 src/attacker/  cli.js (REPL)
 tests/         node:test unit tests
 docker/        Dockerfile · docker-compose.yml · setup-registry.sh · entrypoint.sh
