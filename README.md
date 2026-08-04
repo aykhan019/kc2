@@ -5,12 +5,14 @@ An **educational research lab** demonstrating an indirect command-and-control
 inspired by the npm-c2 research. Built for understanding C2 channel design and
 **defender detection** — not for offensive use.
 
-> **Scope / ethics**: the victim agent executes only four hard-coded, harmless
-> mock tasks (`echo`, `sysinfo`, `ping`, `time`). There is **no** arbitrary
-> command execution, persistence, privilege escalation, obfuscation, or
-> encryption. Payloads are deliberately plain base64 so every artifact is
-> readable and analyzable. The default registry is a **local** verdaccio
-> container. Do not point this at packages or accounts you do not own.
+> **Scope / ethics**: the victim agent executes only hard-coded mock tasks
+> (`echo`, `sysinfo`, `ping`, `time`, `whoami`, `getfile`). There is **no**
+> arbitrary command execution, persistence, privilege escalation, obfuscation,
+> or encryption. `getfile` is limited to a configured victim-side transfer
+> directory and a small size cap. Payloads are deliberately plain base64 so
+> every artifact is readable and analyzable. The default registry is a
+> **local** verdaccio container. Do not point this at packages or accounts you
+> do not own.
 
 ## Architecture
 
@@ -65,6 +67,8 @@ In the CLI:
 
 ```
 npm-c2> task all ping          # broadcast a command
+npm-c2> task all whoami        # report mock identity details
+npm-c2> task all getfile demo.png  # fetch transfer/demo.png from the victim
 npm-c2> watch 3                # poll for results every 3s (Ctrl-C to stop)
 npm-c2> agents                 # list agents that have reported
 npm-c2> stats                  # local counters
@@ -107,12 +111,26 @@ research. If you do this:
   can see your commands and results.
 
 Set `registryUrl: "https://registry.npmjs.org"` and your `packageName` in
-`config.json` (or via `NPM_C2_REGISTRY_URL` / `NPM_C2_PACKAGE_NAME`).
+`config.json` — or better, put everything including the token in `env.sh`
+(see below), which keeps secrets out of config files entirely.
 
 ## Configuration
 
 Copy `config.example.json` to `config.json` (both sides read it), or override
-with environment variables:
+with environment variables.
+
+**Recommended: `env.sh`.** Both sides auto-load an `env.sh` file in the
+project root at startup (`KEY=VALUE` or `export KEY=VALUE` lines). It is
+git-ignored and is the intended place for the token — no pasting secrets
+into your shell history, and both `npm run victim` and `npm run attacker`
+pick it up no matter which terminal they run in:
+
+```sh
+cp env.sh.example env.sh   # then edit env.sh and fill in your values
+```
+
+Real environment variables always win over `env.sh` values. Use
+`NPM_C2_ENV_FILE=/path/to/file` to load a different file.
 
 | Key / env var | Meaning | Default |
 |---|---|---|
@@ -122,7 +140,10 @@ with environment variables:
 | `agentId` / `NPM_C2_AGENT_ID` | victim id (generated + persisted if empty) | `""` |
 | `logFile` / `NPM_C2_LOG_FILE` | append-only log file (`""` disables) | `logs/lab.log` |
 | `stateFile` / `NPM_C2_STATE_FILE` | state file path (role default if empty) | `""` |
-| — / `NPM_C2_TOKEN` | registry bearer token (**env only, never a file**) | — |
+| `maxFileBytes` / `NPM_C2_MAX_FILE_BYTES` | max bytes returned by `getfile` | `32768` |
+| `transferRoot` / `NPM_C2_TRANSFER_ROOT` | victim-side directory `getfile` may read from | `transfer` |
+| — / `NPM_C2_TOKEN` | registry bearer token (**env / `env.sh` only, never `config.json`**) | — |
+| — / `NPM_C2_ENV_FILE` | explicit env.sh path | `./env.sh` |
 | — / `NPM_C2_CONFIG` | explicit config file path | `./config.json` |
 | — / `NPM_C2_LOG_LEVEL` | `debug`/`info`/`warn`/`error` | `info` |
 
@@ -135,12 +156,17 @@ to reset a side.
 | Command | Description |
 |---|---|
 | `agents` | list agent ids seen in result tags |
-| `task <agentId\|all> <op> [text...]` | publish a command tag (ops: `echo`, `sysinfo`, `ping`, `time`) |
+| `task <agentId\|all> <op> [args...]` | publish a command tag (ops: `echo`, `sysinfo`, `ping`, `time`, `whoami`, `getfile`) |
 | `poll` | fetch & decode new result tags once |
 | `watch [intervalSec]` | poll continuously until Ctrl-C |
 | `clean` | delete all `x-cmd-*`/`x-res-*` tags (leaves only `latest`) |
 | `stats` | local counters: sent, received, per-agent |
 | `help`, `exit` | — |
+
+`getfile` transfers bytes, so small images and short video samples work the
+same way as text files. Stage them under the victim's `transferRoot` and use a
+relative path, for example `task all getfile sample.png`. The attacker saves
+reassembled downloads under `downloads/`.
 
 ## Development
 

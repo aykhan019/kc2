@@ -110,7 +110,11 @@ export class RegistryClient {
         } else if (err && err.name === 'AbortError') {
           regErr = new RegistryError('request aborted', { retriable: true, cause: err });
         } else {
-          regErr = new RegistryError(`network error contacting registry: ${err.message}`, {
+          // undici's "fetch failed" hides the real reason in `cause`
+          // (ENOTFOUND, ECONNREFUSED, CERT_*, proxy refusal, ...). Surface it.
+          const c = err.cause;
+          const detail = c ? ` [${c.code ?? c.message ?? String(c)}]` : '';
+          regErr = new RegistryError(`network error contacting registry: ${err.message}${detail}`, {
             retriable: true,
             cause: err,
           });

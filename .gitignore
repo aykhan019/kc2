@@ -1,6 +1,9 @@
 node_modules/
 logs/
+downloads/
+transfer/
 config.json
+env.sh
 victim-state.json
 attacker-state.json
 *-state.json

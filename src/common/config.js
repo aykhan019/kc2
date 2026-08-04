@@ -1,4 +1,10 @@
 // Configuration loader: defaults < config file < environment overrides.
+//
+// Before anything else is read, an optional `env.sh` file (KEY=VALUE or
+// `export KEY=VALUE` lines) is loaded into process.env. This is the
+// supported way to keep NPM_C2_TOKEN out of your shell history while still
+// supplying it "via the environment". env.sh must be git-ignored — it
+// contains a secret. Real environment variables always win over env.sh.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -9,8 +15,51 @@ export const DEFAULTS = {
   agentId: '', // optional; generated and persisted by the victim if absent
   logFile: '', // '' disables file logging
   stateFile: '', // role-specific default is used when empty
+  maxFileBytes: 32 * 1024, // cap for the getfile task (channel moves ~130B/tag)
+  transferRoot: 'transfer', // victim-side directory getfile may read from
   token: '', // only ever populated from the NPM_C2_TOKEN env var
 };
+
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Load KEY=VALUE lines from an env.sh-style file into process.env.
+ * Looks at $NPM_C2_ENV_FILE first, then ./env.sh. Missing file is fine.
+ * Lines already present in the real environment are NOT overridden.
+ * Supports: blank lines, # comments, optional `export ` prefix,
+ * optional single/double quotes around values.
+ * @returns {string|null} path that was loaded, or null
+ */
+export function loadEnvFile(envPath) {
+  const file = envPath
+    ? path.resolve(envPath)
+    : process.env.NPM_C2_ENV_FILE
+      ? path.resolve(process.env.NPM_C2_ENV_FILE)
+      : path.resolve('env.sh');
+  if (!fs.existsSync(file)) return null;
+
+  const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#')) continue;
+    const body = line.startsWith('export ') ? line.slice('export '.length).trimStart() : line;
+    const eq = body.indexOf('=');
+    if (eq < 1) continue;
+    const key = body.slice(0, eq).trim();
+    if (!ENV_KEY_RE.test(key)) continue;
+    let value = body.slice(eq + 1).trim();
+    if (
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] === undefined) {
+      process.env[key] = value;
+    }
+  }
+  return file;
+}
 
 /**
  * Resolve which config file to use.
@@ -28,6 +77,7 @@ export function resolveConfigPath(explicitPath) {
  * @returns {object} merged, validated config
  */
 export function loadConfig(explicitPath) {
+  loadEnvFile(); // populate process.env from env.sh first (real env still wins)
   const cfg = { ...DEFAULTS };
 
   const filePath = resolveConfigPath(explicitPath);
@@ -52,6 +102,11 @@ export function loadConfig(explicitPath) {
     cfg.logFile = process.env.NPM_C2_LOG_FILE;
   }
   if (process.env.NPM_C2_STATE_FILE) cfg.stateFile = process.env.NPM_C2_STATE_FILE;
+  if (process.env.NPM_C2_MAX_FILE_BYTES) {
+    const n = Number(process.env.NPM_C2_MAX_FILE_BYTES);
+    if (Number.isFinite(n) && n > 0) cfg.maxFileBytes = Math.floor(n);
+  }
+  if (process.env.NPM_C2_TRANSFER_ROOT) cfg.transferRoot = process.env.NPM_C2_TRANSFER_ROOT;
 
   // The auth token is ONLY ever read from the environment — never from a file.
   cfg.token = process.env.NPM_C2_TOKEN || '';
@@ -73,6 +128,13 @@ export function loadConfig(explicitPath) {
   cfg.pollIntervalSec = Number(cfg.pollIntervalSec);
   if (!Number.isFinite(cfg.pollIntervalSec) || cfg.pollIntervalSec <= 0) {
     throw new Error(`pollIntervalSec must be a positive number, got ${cfg.pollIntervalSec}`);
+  }
+  if (!Number.isFinite(Number(cfg.maxFileBytes)) || Number(cfg.maxFileBytes) <= 0) {
+    throw new Error(`maxFileBytes must be a positive number, got ${cfg.maxFileBytes}`);
+  }
+  cfg.maxFileBytes = Math.floor(Number(cfg.maxFileBytes));
+  if (!cfg.transferRoot || typeof cfg.transferRoot !== 'string') {
+    throw new Error('transferRoot must be a non-empty string');
   }
 
   return cfg;

@@ -4,5 +4,7 @@
   "pollIntervalSec": 10,
   "agentId": "",
   "logFile": "logs/lab.log",
-  "stateFile": ""
+  "stateFile": "",
+  "maxFileBytes": 32768,
+  "transferRoot": "transfer"
 }

@@ -3,7 +3,8 @@
 //
 // Commands:
 //   agents                      list agent ids seen in result tags / state
-//   task <agentId|all> <op> [text...]   publish a command tag (ops: echo, sysinfo, ping, time)
+//   task <agentId|all> <op> [args...]   publish a command tag
+//                         (ops: echo, sysinfo, ping, time, whoami, getfile)
 //   poll                        one-shot fetch & decode of new result tags
 //   watch [intervalSec]         continuously poll until Ctrl-C
 //   clean                       delete all lab tags (x-cmd-*/x-res-*) from the registry
@@ -13,6 +14,7 @@
 
 import readline from 'node:readline/promises';
 import fs from 'node:fs';
+import path from 'node:path';
 import { styleText } from 'node:util';
 import { loadConfig, configArgFromArgv } from '../common/config.js';
 import { createLogger } from '../common/logger.js';
@@ -67,23 +69,59 @@ function parseTaskLine(line) {
   const tokens = line.trim().split(/\s+/);
   const [, target, op, ...rest] = tokens;
   if (!target || !op) {
-    throw new Error('usage: task <agentId|all> <op> [text...]');
+    throw new Error('usage: task <agentId|all> <op> [args...]');
   }
   if (!TASK_OPS.includes(op)) {
     throw new Error(`unknown op "${op}" — allowed: ${TASK_OPS.join(', ')}`);
   }
   const args = {};
   if (op === 'echo') args.text = rest.join(' ');
+  if (op === 'getfile') {
+    args.path = rest.join(' ');
+    if (!args.path) throw new Error('usage: task <agentId|all> getfile <path>');
+  }
   return { target, op, args };
+}
+
+function sanitizeFilename(name) {
+  return path.basename(String(name)).replace(/[^A-Za-z0-9._-]/g, '_') || 'file.bin';
+}
+
+/** Save a transferred file from a result payload to downloads/. */
+function saveDownload(agentId, r) {
+  const dir = path.resolve('downloads');
+  fs.mkdirSync(dir, { recursive: true });
+  const out = path.join(dir, `${agentId}-seq${r.seq}-${sanitizeFilename(r.file.name)}`);
+  if (!Number.isSafeInteger(r.file.size) || r.file.size < 0) {
+    throw new Error('missing or invalid file size');
+  }
+  if (typeof r.file.dataB64 !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(r.file.dataB64)) {
+    throw new Error('file payload is not valid base64');
+  }
+  const data = Buffer.from(r.file.dataB64, 'base64');
+  if (data.length !== r.file.size) {
+    throw new Error(`decoded size mismatch (${data.length} bytes, expected ${r.file.size})`);
+  }
+  fs.writeFileSync(out, data);
+  return out;
 }
 
 function printResult(agentId, r) {
   const head = c('magenta', `${agentId} seq=${r.seq} op=${r.op ?? '?'}`);
-  if (r.ok) {
-    console.log(`${head} ${c('green', 'ok')}: ${r.output}`);
-  } else {
+  if (!r.ok) {
     console.log(`${head} ${c('red', 'error')}: ${r.error}`);
+    return;
   }
+  if (r.file && typeof r.file.dataB64 === 'string') {
+    try {
+      const out = saveDownload(agentId, r);
+      console.log(`${head} ${c('green', 'ok')}: ${r.output} -> saved to ${c('bold', out)}`);
+    } catch (err) {
+      console.log(`${head} ${c('red', 'error')}: received file but failed to save: ${err.message}`);
+    }
+    return;
+  }
+  console.log(`${head} ${c('green', 'ok')}: ${r.output}`);
 }
 
 async function main() {
@@ -160,7 +198,7 @@ async function main() {
       console.log(
         [
           `${c('bold', 'agents')}                          list agent ids seen so far`,
-          `${c('bold', 'task')} <agentId|all> <op> [text]  send a task (ops: ${TASK_OPS.join(', ')})`,
+          `${c('bold', 'task')} <agentId|all> <op> [args]  send a task (ops: ${TASK_OPS.join(', ')})`,
           `${c('bold', 'poll')}                            fetch & decode new result tags once`,
           `${c('bold', 'watch')} [intervalSec]             poll continuously until Ctrl-C`,
           `${c('bold', 'clean')}                           delete all x-cmd-*/x-res-* tags`,
@@ -172,7 +210,11 @@ async function main() {
     },
 
     async agents() {
-      await pollOnce({ quiet: true }).catch(() => {}); // best-effort refresh
+      try {
+        await pollOnce({ quiet: true }); // best-effort refresh
+      } catch (err) {
+        console.log(c('yellow', `registry refresh failed: ${err.message}`));
+      }
       if (state.agents.length === 0) {
         console.log('no agents seen yet');
       } else {

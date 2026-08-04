@@ -62,17 +62,29 @@ x-res-a1b2c3d4-7-2of2-25nIn0 -> 1.0.0
 Command payload (JSON):
 
 ```json
-{ "op": "echo|sysinfo|ping|time", "args": { "text": "..." }, "ts": 1720000000000 }
+{ "op": "echo|sysinfo|ping|time|whoami|getfile", "args": { "text": "...", "path": "..." }, "ts": 1720000000000 }
 ```
 
 `op` is restricted to the victim's hard-coded mock allowlist
-(`echo`, `sysinfo`, `ping`, `time`). Anything else is answered with
-`ok: false`.
+(`echo`, `sysinfo`, `ping`, `time`, `whoami`, `getfile`). Anything else is
+answered with `ok: false`. `getfile` reads one file from the victim-side
+`transferRoot` (`transfer/` by default), enforces `maxFileBytes` (default
+32 KiB), and returns it as base64 in the result payload's optional `file`
+field (`{ name, size, dataB64 }`). Relative paths are resolved under
+`transferRoot`; absolute paths and symlinks are accepted only if their resolved
+target stays inside `transferRoot`. The attacker CLI reassembles the result and
+saves it under `downloads/`.
 
 Result payload (JSON):
 
 ```json
 { "seq": 7, "op": "ping", "ok": true, "output": "pong", "error": null, "ts": 1720000001000 }
+```
+
+`getfile` result payloads add a file object:
+
+```json
+{ "seq": 8, "op": "getfile", "ok": true, "output": "sample.png (1024 bytes)", "file": { "name": "sample.png", "size": 1024, "dataB64": "..." }, "ts": 1720000002000 }
 ```
 
 ## Size limit and chunking

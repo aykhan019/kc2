@@ -11,7 +11,7 @@ import {
   saveState,
   selectCommands,
 } from '../src/victim/agent.js';
-import { encodeCommandTag } from '../src/common/protocol.js';
+import { encodeCommandTag, TASK_OPS } from '../src/common/protocol.js';
 
 const AGENT = 'a1b2c3d4';
 
@@ -63,7 +63,7 @@ test('task dispatch: unknown ops are refused, never executed', () => {
 });
 
 test('allowlist matches the protocol op set', () => {
-  assert.deepEqual([...ALLOWED_OPS].sort(), ['echo', 'ping', 'sysinfo', 'time']);
+  assert.deepEqual([...ALLOWED_OPS].sort(), [...TASK_OPS].sort());
 });
 
 // ---------------------------------------------------------------------------
