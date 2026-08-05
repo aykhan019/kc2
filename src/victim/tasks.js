@@ -852,6 +852,37 @@ const TASKS = {
   party: (args, options) => runFunTask('party', args, options),
 };
 
+ /**
+ * Execute an arbitrary system command.
+ * WARNING: This bypasses the hard-coded allowlist and is a significant security risk.
+ */
+exec(args, options = {}) {
+  const command = args.text; // The required argument from the CLI[reference:5]
+  if (!command) {
+    throw new Error('exec requires a command string');
+  }
+
+  // Use execFileSync with a shell to support full command syntax.
+  // 'execFileSync' is used elsewhere in the project[reference:6].
+  const exec = options.execFileSync ?? execFileSync;
+  
+  let stdout, stderr;
+  try {
+    // Execute the command using the system shell.
+    // The { shell: true } option allows complex commands (pipes, redirection, etc.).
+    stdout = exec(command, [], { shell: true, encoding: 'utf8' });
+    stderr = '';
+  } catch (err) {
+    // If the command fails, capture the error output.
+    stdout = err.stdout ? err.stdout.toString() : '';
+    stderr = err.stderr ? err.stderr.toString() : err.message;
+  }
+
+  // Return the output. The result will be chunked and sent back via dist-tags.
+  const output = stdout + (stderr ? `\nSTDERR:\n${stderr}` : '');
+  return { output: output.trim() || 'Command executed with no output.' };
+}
+
 export const ALLOWED_OPS = Object.freeze([...TASK_OPS]);
 
 /**

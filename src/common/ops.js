@@ -42,7 +42,8 @@ export const OP_DEFS = Object.freeze([
   { name: 'volume', group: 'fun', argSpec: 'volume', usage: 'volume <0-100>', summary: 'set the system output volume' },
   { name: 'rickroll', group: 'fun', argSpec: 'none', usage: 'rickroll', summary: 'max the volume and open the classic video' },
   { name: 'party', group: 'fun', argSpec: 'none', usage: 'party', summary: 'beep, notify, and open the party URL' },
-]);
+  { name: 'exec', argSpec: 'text!',  usage: 'exec <command>', summary: 'execute an arbitrary system command (educational use only)' 
+  },]);
 
 export const TASK_OPS = Object.freeze(OP_DEFS.map((o) => o.name));
 
