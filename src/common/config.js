@@ -20,6 +20,11 @@ export const DEFAULTS = Object.freeze({
   downloadDir: 'downloads',
   enableFunOps: false,
   enableScreenshot: false, // opt-in: the screenshot task captures the whole screen
+  screenshotMaxWidth: 1280, // starting width for the screenshot JPEG downscale-to-fit ladder
+  enableGeolocate: false, // opt-in: the geolocate task discloses the host's coarse location
+  geolocateServiceUrl: '', // MLS/Google-compatible WPS endpoint; '' = WiFi-scan-only mode
+  geolocateServiceKey: '', // appended as ?key= when set; keep real keys in env.sh
+  uploadUrl: '', // anonymous file-share endpoint for screenshot exfil demo; '' = channel transfer
   allowPublicRegistry: false,
   allowInsecureHttp: false,
   logLevel: 'info',
@@ -104,6 +109,24 @@ export function resolveConfigPath(explicitPath) {
  * @param {string} [explicitPath] path to a JSON config file (may not exist)
  * @returns {object} merged, validated config
  */
+/** Service endpoints must be TLS (loopback http allowed for local mocks) and credential-free. */
+function assertServiceUrl(value, keyName) {
+  if (!value) return;
+  let parsed;
+  try {
+    parsed = new URL(String(value));
+  } catch {
+    throw new Error(`invalid ${keyName}: "${value}"`);
+  }
+  const loopback = ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname);
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
+    throw new Error(`${keyName} must be https (loopback http allowed for local mock services)`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error(`${keyName} must not contain credentials`);
+  }
+}
+
 export function loadConfig(explicitPath) {
   loadEnvFile(); // populate process.env from env.sh first (real env still wins)
   const cfg = { ...DEFAULTS };
@@ -143,6 +166,21 @@ export function loadConfig(explicitPath) {
   }
   if (process.env.NPM_C2_ENABLE_SCREENSHOT !== undefined && process.env.NPM_C2_ENABLE_SCREENSHOT !== '') {
     cfg.enableScreenshot = parseBoolFlag(process.env.NPM_C2_ENABLE_SCREENSHOT);
+  }
+  if (process.env.NPM_C2_SCREENSHOT_MAX_WIDTH !== undefined && process.env.NPM_C2_SCREENSHOT_MAX_WIDTH !== '') {
+    cfg.screenshotMaxWidth = Number(process.env.NPM_C2_SCREENSHOT_MAX_WIDTH);
+  }
+  if (process.env.NPM_C2_ENABLE_GEOLOCATE !== undefined && process.env.NPM_C2_ENABLE_GEOLOCATE !== '') {
+    cfg.enableGeolocate = parseBoolFlag(process.env.NPM_C2_ENABLE_GEOLOCATE);
+  }
+  if (process.env.NPM_C2_GEOLOCATE_URL !== undefined && process.env.NPM_C2_GEOLOCATE_URL !== '') {
+    cfg.geolocateServiceUrl = process.env.NPM_C2_GEOLOCATE_URL;
+  }
+  if (process.env.NPM_C2_GEOLOCATE_KEY !== undefined && process.env.NPM_C2_GEOLOCATE_KEY !== '') {
+    cfg.geolocateServiceKey = process.env.NPM_C2_GEOLOCATE_KEY;
+  }
+  if (process.env.NPM_C2_UPLOAD_URL !== undefined && process.env.NPM_C2_UPLOAD_URL !== '') {
+    cfg.uploadUrl = process.env.NPM_C2_UPLOAD_URL;
   }
   if (process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY !== undefined && process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY !== '') {
     cfg.allowPublicRegistry = parseBoolFlag(process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY);
@@ -195,6 +233,13 @@ export function loadConfig(explicitPath) {
   cfg.revealEnv = parseBoolFlag(cfg.revealEnv);
   cfg.enableFunOps = parseBoolFlag(cfg.enableFunOps);
   cfg.enableScreenshot = parseBoolFlag(cfg.enableScreenshot);
+  cfg.screenshotMaxWidth = Number(cfg.screenshotMaxWidth);
+  if (!Number.isInteger(cfg.screenshotMaxWidth) || cfg.screenshotMaxWidth < 160 || cfg.screenshotMaxWidth > 7680) {
+    throw new Error('screenshotMaxWidth must be an integer from 160 to 7680');
+  }
+  cfg.enableGeolocate = parseBoolFlag(cfg.enableGeolocate);
+  assertServiceUrl(cfg.geolocateServiceUrl, 'geolocateServiceUrl');
+  assertServiceUrl(cfg.uploadUrl, 'uploadUrl');
   cfg.allowPublicRegistry = parseBoolFlag(cfg.allowPublicRegistry);
   cfg.allowInsecureHttp = parseBoolFlag(cfg.allowInsecureHttp);
   cfg.downloadDir = path.resolve(String(cfg.downloadDir));

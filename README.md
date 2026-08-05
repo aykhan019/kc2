@@ -7,9 +7,10 @@ inspired by the npm-c2 research. Built for understanding C2 channel design and
 **defender detection** — not for offensive use.
 
 > **Scope / ethics**: the victim agent executes only hard-coded mock tasks
-> (24 allowlisted ops — see `src/common/ops.js`: `echo`, `ping`, `time`,
+> (26 allowlisted ops — see `src/common/ops.js`: `echo`, `ping`, `time`,
 > `sysinfo`, `whoami`, `env`, `netinfo`, `ps`, `df`, `pwd`, `cd`, `ls`,
-> `stat`, `find`, `hash`, `getfile`, plus eight visible/audible `fun` ops).
+> `stat`, `find`, `hash`, `getfile`, `screenshot`, `geolocate`, plus eight
+> visible/audible `fun` ops).
 > There is **no** arbitrary command
 > execution, persistence, privilege escalation, obfuscation, or encryption.
 > Path operations are confined to a configured filesystem root, and
@@ -162,6 +163,11 @@ The table lists built-in defaults. `config.example.json` intentionally enables
 | `downloadDir` / `NPM_C2_DOWNLOAD_DIR` | attacker destination for received files | `downloads` |
 | `enableFunOps` / `NPM_C2_ENABLE_FUN_OPS` | enable attended-host desktop actions | `false` |
 | `enableScreenshot` / `NPM_C2_ENABLE_SCREENSHOT` | enable the `screenshot` task (captures the whole screen) | `false` |
+| `screenshotMaxWidth` / `NPM_C2_SCREENSHOT_MAX_WIDTH` | starting width (px) of the screenshot JPEG downscale ladder, 160–7680 | `1280` |
+| `uploadUrl` / `NPM_C2_UPLOAD_URL` | anonymous no-key file-share endpoint (`0x0.st`/`transfer.sh` style); screenshots upload full-res and return just a URL. Empty = channel transfer | `""` |
+| `enableGeolocate` / `NPM_C2_ENABLE_GEOLOCATE` | enable the `geolocate` task (WiFi positioning demo; discloses host location) | `false` |
+| `geolocateServiceUrl` / `NPM_C2_GEOLOCATE_URL` | MLS/Google-compatible WPS endpoint for coordinate lookup; empty = WiFi-scan-only mode | `""` |
+| `geolocateServiceKey` / `NPM_C2_GEOLOCATE_KEY` | API key appended as `?key=` to the WPS endpoint | `""` |
 | `allowPublicRegistry` / `NPM_C2_ALLOW_PUBLIC_REGISTRY` | opt in to `registry.npmjs.org` | `false` |
 | `allowInsecureHttp` / `NPM_C2_ALLOW_INSECURE_HTTP` | permit token use over non-loopback HTTP | `false` |
 | `logLevel` / `NPM_C2_LOG_LEVEL` | `debug`/`info`/`warn`/`error` | `info` |
@@ -196,11 +202,40 @@ taking a path: `cd`, `stat`, `hash`, `getfile` — the path is **absolute, or
 relative to the agent's current working directory** (use `pwd` to see the cwd
 and `cd` to change it).
 `ls [path]` lists a directory (default: the agent's cwd)
-and `find <dir> <text>` searches file names recursively. `screenshot` captures
-the whole screen (all displays) with OS built-in tools and transfers the PNG
-back like `getfile` (size-capped by `maxFileBytes`); it requires
+and `find <dir> <text>` searches file names recursively. `screenshot [maxwidth]`
+captures the whole screen (all displays) with OS built-in tools. What comes
+back depends on the victim's configuration:
+
+- **`uploadUrl` set (exfil-by-reference demo)** — the full-resolution PNG is
+  uploaded with one multipart POST to an anonymous, no-key file share
+  (`https://0x0.st`, `transfer.sh`, `tmpfiles.org`, or any compatible
+  endpoint) and the result is just the URL — a single result tag instead of
+  hundreds. This mirrors the real-world "living off trusted sites" pattern:
+  the C2 channel carries a reference, never the bytes. Uploaded links are
+  world-readable; treat them as expired after the demo. If the upload fails,
+  the task falls back to channel transfer automatically.
+- **`uploadUrl` empty (default)** — the image rides the dist-tag channel
+  like `getfile`, size-capped by `maxFileBytes`. A raw full-screen PNG
+  rarely fits the ~130-bytes-per-tag channel, so when the PNG exceeds the
+  cap the victim walks a downscale ladder and sends a JPEG at the largest
+  width that fits — starting at `maxwidth` (default: the victim's
+  `screenshotMaxWidth`, 1280) down to a 240px floor (`sips` on macOS,
+  ImageMagick on Linux, System.Drawing on Windows); it only fails if even
+  the floor exceeds the cap.
+
+`screenshot` requires
 `enableScreenshot=true` on the victim, and on macOS the agent's terminal needs
-Screen Recording permission. The allowlist is
+Screen Recording permission. `geolocate` demonstrates the classic WiFi
+positioning attack: the agent scans the BSSIDs its radio can hear with OS
+built-in tools (`airport`/`system_profiler` on macOS, `nmcli` on Linux,
+`netsh wlan` on Windows), then — when `geolocateServiceUrl` is configured —
+resolves them against a WiFi Positioning System (WPS) database for
+coordinates with an accuracy estimate. This is how real-world implants
+locate hosts that have no GPS: BSSIDs are worldwide index keys in
+wardriving-derived databases (Google, Mozilla, Apple, WiGLE). Without a
+service URL the task returns the scan-only reconnaissance stage, which is
+itself the teachable artifact. It requires `enableGeolocate=true` on the
+victim. The allowlist is
 data-driven: `src/common/ops.js` holds each op's name, usage, argument spec,
 and help summary — adding an op is one entry there plus one handler under
 `src/victim/`.

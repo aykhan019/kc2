@@ -167,6 +167,14 @@ function parseTaskLine(line) {
         throw new Error(`usage: task <agentId|all> ${def.usage}`);
       }
       break;
+    case 'width?':
+      if (rest.length > 0) {
+        args.width = Number(rest[0]);
+        if (rest.length !== 1 || !Number.isInteger(args.width) || args.width < 160 || args.width > 7680) {
+          throw new Error(`usage: task <agentId|all> ${def.usage} (maxwidth 160-7680)`);
+        }
+      }
+      break;
     case 'path':
       args.path = rest.join(' ');
       if (!args.path) throw new Error(`usage: task <agentId|all> ${def.usage}${pathHint}`);

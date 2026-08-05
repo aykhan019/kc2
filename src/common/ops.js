@@ -10,6 +10,7 @@
 //   text!       required free-form text, joined into args.text
 //   url         required http(s) URL -> args.url
 //   volume      required integer from 0-100 -> args.level
+//   width?      optional integer from 160-7680 -> args.width
 //   path        required path -> args.path (absolute or agent-cwd-relative)
 //   path?       optional path -> args.path (default: agent cwd)
 //   path+query  "find <dir> <text>" -> args.path + args.query
@@ -31,7 +32,8 @@ export const OP_DEFS = Object.freeze([
   { name: 'find', argSpec: 'path+query', usage: 'find <dir> <text>', summary: 'files under dir whose name contains text' },
   { name: 'hash', argSpec: 'path', usage: 'hash <file>', summary: 'SHA-256 of a file (read-only, <= 64 MiB)' },
   { name: 'getfile', argSpec: 'path', usage: 'getfile <file>', summary: 'transfer a file back (base64, size-capped)' },
-  { name: 'screenshot', group: 'screen', argSpec: 'none', usage: 'screenshot', summary: 'capture the screen and transfer the PNG back (size-capped)' },
+  { name: 'screenshot', group: 'screen', argSpec: 'width?', usage: 'screenshot [maxwidth]', summary: 'capture the screen and transfer it back (JPEG-downscaled to fit the channel)' },
+  { name: 'geolocate', group: 'system', argSpec: 'none', usage: 'geolocate', summary: 'determine location via GPS/WiFi with accuracy estimate (opt-in)' },
   { name: 'openurl', group: 'fun', argSpec: 'url', usage: 'openurl <url>', summary: 'open an http(s) URL in the default browser' },
   { name: 'say', group: 'fun', argSpec: 'text!', usage: 'say <text>', summary: 'speak up to 200 characters' },
   { name: 'notify', group: 'fun', argSpec: 'text!', usage: 'notify <text>', summary: 'show a desktop notification' },

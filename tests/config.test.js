@@ -132,6 +132,10 @@ test('production safety settings are secure by default and paths resolve absolut
   const cfg = loadConfig('/nonexistent/config.json');
   assert.equal(cfg.enableFunOps, false);
   assert.equal(cfg.enableScreenshot, false);
+  assert.equal(cfg.enableGeolocate, false);
+  assert.equal(cfg.geolocateServiceUrl, '');
+  assert.equal(cfg.geolocateServiceKey, '');
+  assert.equal(cfg.screenshotMaxWidth, 1280);
   assert.equal(cfg.allowPublicRegistry, false);
   assert.equal(cfg.allowInsecureHttp, false);
   assert.equal(cfg.downloadDir, path.resolve('downloads'));
@@ -139,6 +143,37 @@ test('production safety settings are secure by default and paths resolve absolut
   assert.equal(cfg.requestTimeoutMs, 10_000);
   assert.equal(cfg.maxRetries, 3);
   assert.equal(cfg.retryBaseDelayMs, 500);
+});
+
+test('geolocateServiceUrl must be https or loopback http, without credentials', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-configtest-'));
+  const config = path.join(dir, 'config.json');
+
+  fs.writeFileSync(config, JSON.stringify({ geolocateServiceUrl: 'http://wps.example.test/geolocate' }));
+  assert.throws(() => loadConfig(config), /geolocateServiceUrl/);
+
+  fs.writeFileSync(config, JSON.stringify({ geolocateServiceUrl: 'https://user:pass@wps.example.test' }));
+  assert.throws(() => loadConfig(config), /credentials/);
+
+  fs.writeFileSync(config, JSON.stringify({ geolocateServiceUrl: 'http://127.0.0.1:8080/geolocate' }));
+  assert.equal(loadConfig(config).geolocateServiceUrl, 'http://127.0.0.1:8080/geolocate');
+});
+
+test('uploadUrl follows the same service-URL rules and defaults to off', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-configtest-'));
+  const config = path.join(dir, 'config.json');
+
+  fs.writeFileSync(config, JSON.stringify({}));
+  assert.equal(loadConfig(config).uploadUrl, '');
+
+  fs.writeFileSync(config, JSON.stringify({ uploadUrl: 'http://files.example.test' }));
+  assert.throws(() => loadConfig(config), /uploadUrl must be https/);
+
+  fs.writeFileSync(config, JSON.stringify({ uploadUrl: 'https://0x0.st' }));
+  assert.equal(loadConfig(config).uploadUrl, 'https://0x0.st');
+
+  fs.writeFileSync(config, JSON.stringify({ uploadUrl: 'http://localhost:9999/upload' }));
+  assert.equal(loadConfig(config).uploadUrl, 'http://localhost:9999/upload');
 });
 
 test('public npm and plaintext remote tokens require explicit opt-ins', () => {
@@ -179,6 +214,7 @@ test('configuration rejects placeholders, credentials in URLs, and invalid runti
     ['requestTimeoutMs', 0, /requestTimeoutMs/],
     ['maxRetries', 11, /maxRetries/],
     ['retryBaseDelayMs', 0, /retryBaseDelayMs/],
+    ['screenshotMaxWidth', 10, /screenshotMaxWidth/],
   ]) {
     fs.writeFileSync(config, JSON.stringify({ [key]: value }));
     assert.throws(() => loadConfig(config), expected);

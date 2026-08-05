@@ -24,6 +24,23 @@ However, because dist-tags are designed for semver environment aliases (e.g. `la
 - **State Files**: Creation of JSON state tracking files on disk (e.g. `victim-state.json` or `attacker-state.json`) recording sequence numbers (`lastSeq`, `nextSeq`) and generated agent identifiers (`agentId`).
 - **Unusual Node Process Activity**: Long-running background `node` processes executing polling loops against external npm registry HTTP APIs without interactive developer invocation.
 
+### 4. WiFi Positioning (Geolocation) Task Artifacts
+- **WiFi Scan Tool Invocations**: A non-system process (e.g. `node`) spawning WiFi survey utilities — `airport -s` or `system_profiler SPAirPortDataType` (macOS), `nmcli ... dev wifi list` (Linux), `netsh wlan show networks mode=bssid` (Windows). Interactive users rarely script these; implants run them to harvest BSSIDs.
+- **WPS Database Lookups**: Outbound HTTPS `POST` requests carrying a JSON body of `wifiAccessPoints`/`macAddress` entries to geolocation endpoints (`www.googleapis.com/geolocation`, `location.services.mozilla.com`, or similar) from a non-browser process. This is stage 2 of the WiFi positioning technique: BSSID list in, coordinates + accuracy out.
+- **Result Tags Containing Coordinates**: `x-res-*` tag payloads that decode to `lat=`/`lng=`/`accuracyM=` fields.
+
+### 5. Exfil-by-Reference (Cloud Upload) Task Artifacts
+- **Anonymous File-Share Uploads**: Multipart `POST` requests (`curl -F file=@...`) from a non-browser process to public no-key file-sharing or paste services (`0x0.st`, `transfer.sh`, `tmpfiles.org`, `catbox.moe`, `litterbox.catbox.moe`, …). This is the "living off trusted sites" pattern: the payload rides a reputable domain, so domain reputation scoring alone will not catch it — process/service correlation will.
+- **Screen Capture Followed by Upload**: A `screencapture`/`import`/virtual-screen read immediately followed by an outbound multipart POST of similar byte size is a high-confidence exfil sequence.
+- **URL-Only Result Tags**: `x-res-*` payloads that decode to a bare `https://` link into a known file-sharing domain, where earlier results of the same op carried base64 file bytes.
+
+### Detection 5: Screenshot Exfil Sequence (Host Correlation)
+- **Logic**: Alert when a process (1) invokes a screen-capture binary and (2) within seconds initiates an outbound multipart upload to a file-sharing domain, or (3) the C2 channel result shrinks from chunked file bytes to a single URL-bearing tag. The upload destination being a "legitimate" service is the point of the technique; the *sequence* is the signal.
+
+### Detection 4: WiFi Geolocation Beacon (Host + Network Correlation)
+- **Logic**: Alert when a process that is not a location-enabled system service (1) invokes a WiFi survey tool and (2) within a short window makes an outbound POST to a known WPS endpoint. Either leg alone is a weak signal; the correlation is characteristic of implant-driven host geolocation.
+- **Endpoint note (macOS)**: Modern macOS redacts BSSIDs unless the calling terminal holds Location Services permission — unexpected Location permission prompts for Terminal/iTerm are themselves an indicator worth surfacing in class demos.
+
 ---
 
 ## Behavioral Detections

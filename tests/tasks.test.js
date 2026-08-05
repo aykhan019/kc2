@@ -20,7 +20,7 @@ test('allowlist contains exactly the documented ops', () => {
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
     [
-      'beep', 'bounce', 'cd', 'df', 'echo', 'env', 'find', 'getfile', 'hash', 'ls',
+      'beep', 'bounce', 'cd', 'df', 'echo', 'env', 'find', 'geolocate', 'getfile', 'hash', 'ls',
       'netinfo', 'notify', 'openurl', 'party', 'ping', 'ps', 'pwd', 'rickroll',
       'say', 'screenshot', 'stat', 'sysinfo', 'time', 'volume', 'whoami',
     ],
@@ -36,6 +36,112 @@ test('fun ops are categorized for help output', () => {
     OP_DEFS.filter((op) => op.group === 'screen').map((op) => op.name),
     ['screenshot'],
   );
+  assert.equal(OP_DEFS.find((op) => op.name === 'geolocate')?.group, 'system');
+});
+
+// ---------------------------------------------------------------------------
+// geolocate (gated; all scans/lookups use a fake process runner)
+// ---------------------------------------------------------------------------
+
+const AIRPORT_OUT = `
+                            SSID BSSID             RSSI CHANNEL HT CC SECURITY (auth/unicast/group)
+                        LabNet-5G  00:11:22:33:44:55 -52  149     Y  -- WPA2(PSK/AES/AES)
+                    Coffeeshop WiFi  66:77:88:99:aa:bb -71  6       Y  -- WPA2(PSK/AES/AES)
+`;
+const NMCLI_OUT = `00\\:11\\:22\\:33\\:44\\:55:LabNet-5G:96
+66\\:77\\:88\\:99\\:AA\\:BB:Coffee\\:Shop:58
+`;
+const NETSH_OUT = `
+SSID 1 : LabNet-5G
+    Network type            : Infrastructure
+    BSSID 1                 : 00:11:22:33:44:55
+         Signal             : 96%
+SSID 2 : Coffeeshop
+    BSSID 1                 : 66:77:88:99:aa:bb
+         Signal             : 58%
+`;
+const WPS_RESPONSE = JSON.stringify({ location: { lat: 37.422, lng: -122.084 }, accuracy: 22 });
+
+function fakeGeoRuntime(platform, { failScan = false, failLookup = false, extra = {} } = {}) {
+  const calls = [];
+  return {
+    platform,
+    enableGeolocate: true,
+    calls,
+    ...extra,
+    execFileSync(file) {
+      calls.push(file);
+      const missing = () => Object.assign(new Error(`${file} unavailable`), { code: 'ENOENT' });
+      if (platform === 'darwin' && file.includes('airport')) {
+        if (failScan) throw missing();
+        return AIRPORT_OUT;
+      }
+      if (platform === 'darwin' && file === 'system_profiler') throw missing();
+      if (platform === 'linux' && file === 'nmcli') {
+        if (failScan) throw missing();
+        return NMCLI_OUT;
+      }
+      if (platform === 'win32' && file === 'netsh') {
+        if (failScan) throw missing();
+        return NETSH_OUT;
+      }
+      if (file === 'curl') {
+        if (failLookup) throw new Error('curl: (7) connection refused');
+        return WPS_RESPONSE;
+      }
+      throw new Error(`unexpected tool: ${file}`);
+    },
+  };
+}
+
+test('geolocate is disabled unless enableGeolocate is set', () => {
+  for (const limits of [{}, { enableGeolocate: false }]) {
+    const r = runTask('geolocate', {}, limits);
+    assert.equal(r.ok, false);
+    assert.match(r.error, /disabled/);
+  }
+});
+
+test('geolocate scans WiFi BSSIDs per-OS in scan-only mode', () => {
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    const runtime = fakeGeoRuntime(platform); // no geolocateServiceUrl configured
+    const r = runTask('geolocate', {}, runtime);
+    assert.equal(r.ok, true, `${platform}: ${r.error ?? ''}`);
+    assert.match(r.output, /reconnaissance stage/);
+    assert.match(r.output, /00:11:22:33:44:55/);
+    assert.match(r.output, /66:77:88:99:aa:bb/); // normalized to lowercase
+    assert.match(r.output, /LabNet-5G/);
+  }
+});
+
+test('geolocate resolves coordinates with accuracy via the WPS service', () => {
+  const runtime = fakeGeoRuntime('linux', {
+    extra: {
+      geolocateServiceUrl: 'https://wps.example.test/v1/geolocate',
+      geolocateServiceKey: 'lab-key',
+    },
+  });
+  const r = runTask('geolocate', {}, runtime);
+  assert.equal(r.ok, true, r.error ?? '');
+  assert.match(r.output, /wifi-scan \+ WPS database lookup/);
+  assert.match(r.output, /lat=37\.422 lng=-122\.084 accuracyM=22/);
+  assert.match(r.output, /service: wps\.example\.test/);
+  assert.ok(runtime.calls.includes('curl'));
+});
+
+test('geolocate reports scan and lookup failures clearly', () => {
+  const noScan = fakeGeoRuntime('darwin', { failScan: true });
+  const r1 = runTask('geolocate', {}, noScan);
+  assert.equal(r1.ok, false);
+  assert.match(r1.error, /WiFi scan failed/);
+
+  const badLookup = fakeGeoRuntime('linux', {
+    failLookup: true,
+    extra: { geolocateServiceUrl: 'https://wps.example.test/v1/geolocate' },
+  });
+  const r2 = runTask('geolocate', {}, badLookup);
+  assert.equal(r2.ok, false);
+  assert.match(r2.error, /connection refused/);
 });
 
 // ---------------------------------------------------------------------------
@@ -90,17 +196,147 @@ test('screenshot captures per-OS and transfers the PNG like getfile', () => {
   }
 });
 
-test('screenshot enforces maxFileBytes and reports missing tools', () => {
+test('screenshot walks the downscale ladder when the PNG exceeds the cap, and reports missing tools', () => {
+  // The fake "resizer" writes the same 8 bytes for every tool, so the ladder
+  // exhausts and the task reports the floor failure.
   const small = { ...fakeShotRuntime('darwin'), maxFileBytes: 4 };
   const r1 = runTask('screenshot', {}, small);
   assert.equal(r1.ok, false);
-  assert.match(r1.error, /too large/);
+  assert.match(r1.error, /does not fit the 4 byte cap/);
 
   const none = fakeShotRuntime('linux', { failTools: true });
   const r2 = runTask('screenshot', {}, none);
   assert.equal(r2.ok, false);
   assert.match(r2.error, /no screenshot tool/);
   assert.equal(none.calls.length, 3); // import, scrot, gnome-screenshot
+});
+
+// ---------------------------------------------------------------------------
+// screenshot downscale-to-fit (fake capture writes a big PNG, fake resizer
+// writes width-dependent JPEGs)
+// ---------------------------------------------------------------------------
+
+function fakeScaledShot(platform, { pngBytes = 60_000, jpegBytesForWidth = () => 12_000 } = {}) {
+  const calls = [];
+  const write = (p, n) => fs.writeFileSync(p, Buffer.alloc(n, 1));
+  return {
+    platform,
+    enableScreenshot: true,
+    maxFileBytes: 32 * 1024,
+    calls,
+    execFileSync(file, args) {
+      calls.push({ file, args });
+      if (file === 'screencapture' || file === 'import') return write(args.at(-1), pngBytes), '';
+      if (file === 'sips') return write(args.at(-1), jpegBytesForWidth(Number(args[1]))), '';
+      if (file === 'convert' || file === 'magick') {
+        return write(args.at(-1), jpegBytesForWidth(Number.parseInt(args[2], 10))), '';
+      }
+      if (file === 'powershell.exe') {
+        // capture script ends with the output path; resize script: src dest width q
+        if (String(args[3]).includes('CopyFromScreen')) return write(args.at(-1), pngBytes), '';
+        return write(args.at(-3), jpegBytesForWidth(Number(args.at(-2)))), '';
+      }
+      throw new Error(`unexpected tool: ${file}`);
+    },
+  };
+}
+
+test('screenshot downscales to a fitting JPEG with the per-OS resizer', () => {
+  const expected = { darwin: 'sips', linux: 'convert', win32: 'powershell.exe' };
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    const runtime = fakeScaledShot(platform);
+    const r = runTask('screenshot', {}, runtime);
+    assert.equal(r.ok, true, `${platform}: ${r.error ?? ''}`);
+    assert.equal(r.file.name, 'screenshot.jpg');
+    assert.equal(r.file.size, 12_000);
+    assert.match(r.output, /JPEG downscaled to 1280px to fit the 32768-byte channel cap/);
+    assert.equal(runtime.calls[1].file, expected[platform]);
+  }
+});
+
+test('screenshot walks the width ladder until the JPEG fits', () => {
+  const runtime = fakeScaledShot('darwin', { jpegBytesForWidth: (w) => w * 40 });
+  // 1280px -> 51200 (too big), 960px -> 38400 (too big), 640px -> 25600 (fits)
+  const r = runTask('screenshot', {}, runtime);
+  assert.equal(r.ok, true, r.error ?? '');
+  assert.match(r.output, /downscaled to 640px/);
+  const sipsCalls = runtime.calls.filter((c) => c.file === 'sips');
+  assert.deepEqual(sipsCalls.map((c) => c.args[1]), ['1280', '960', '640']);
+});
+
+test('screenshot fails clearly when even the floor exceeds the cap', () => {
+  const runtime = fakeScaledShot('linux', { jpegBytesForWidth: () => 40_000 });
+  const r = runTask('screenshot', {}, runtime);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /does not fit the 32768 byte cap even as a 240px JPEG/);
+});
+
+test('screenshot honors and validates a per-task width override', () => {
+  const runtime = fakeScaledShot('darwin');
+  const r = runTask('screenshot', { width: 480 }, runtime);
+  assert.equal(r.ok, true, r.error ?? '');
+  assert.equal(runtime.calls[1].args[1], '480');
+
+  for (const bad of [10, 8000, 1.5, 'big']) {
+    const rt = fakeScaledShot('darwin');
+    const res = runTask('screenshot', { width: bad }, rt);
+    assert.equal(res.ok, false, `width ${bad} should be rejected`);
+    assert.match(res.error, /width must be an integer from 160 to 7680/);
+    assert.equal(rt.calls.length, 1); // capture happened, resize never did
+  }
+});
+
+// ---------------------------------------------------------------------------
+// screenshot exfil-by-reference (uploadUrl) mode
+// ---------------------------------------------------------------------------
+
+function fakeUploadShot(uploadResponse, { failUpload = false } = {}) {
+  const runtime = fakeScaledShot('darwin', { pngBytes: 5_000_000 });
+  runtime.uploadUrl = 'https://0x0.st';
+  const baseExec = runtime.execFileSync;
+  runtime.execFileSync = (file, args) => {
+    if (file === 'curl') {
+      runtime.calls.push({ file, args });
+      if (failUpload) throw new Error('curl: (6) could not resolve host');
+      return uploadResponse;
+    }
+    return baseExec(file, args);
+  };
+  return runtime;
+}
+
+test('screenshot uploads full-res and returns just the URL when uploadUrl is set', () => {
+  for (const body of ['https://0x0.st/abc123.png\n', '{"success":true,"link":"https://file.io/xyz789"}']) {
+    const runtime = fakeUploadShot(body);
+    const r = runTask('screenshot', {}, runtime);
+    assert.equal(r.ok, true, r.error ?? '');
+    assert.equal(r.file, undefined); // no bytes cross the channel
+    const expectedUrl = body.startsWith('http') ? body.trim() : 'https://file.io/xyz789';
+    assert.match(r.output, new RegExp(expectedUrl.replace(/[./]/g, '\\$&')));
+    assert.match(r.output, /full resolution/);
+    assert.match(r.output, /anyone with this link can read the image/);
+    const curl = runtime.calls.find((c) => c.file === 'curl');
+    assert.ok(curl, 'curl was invoked');
+    assert.match(curl.args.join(' '), /-F file=@/);
+    assert.equal(runtime.calls.some((c) => c.file === 'sips'), false); // no downscale needed
+  }
+});
+
+test('screenshot falls back to channel transfer when the upload fails', () => {
+  const runtime = fakeUploadShot(null, { failUpload: true });
+  const r = runTask('screenshot', {}, runtime);
+  assert.equal(r.ok, true, r.error ?? '');
+  assert.equal(r.file.name, 'screenshot.jpg');
+  assert.match(r.output, /upload to 0x0\.st failed \(curl: \(6\) could not resolve host\)/);
+  assert.match(r.output, /fell back to channel transfer/);
+});
+
+test('screenshot falls back when the upload response has no usable URL', () => {
+  const runtime = fakeUploadShot('{"success":false,"error":"banned filetype"}');
+  const r = runTask('screenshot', {}, runtime);
+  assert.equal(r.ok, true, r.error ?? '');
+  assert.equal(r.file.name, 'screenshot.jpg');
+  assert.match(r.output, /no usable URL/);
 });
 
 test('unknown op is rejected, never executed', () => {
