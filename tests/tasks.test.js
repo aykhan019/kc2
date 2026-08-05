@@ -226,8 +226,33 @@ test('screenshot walks the downscale ladder when the PNG exceeds the cap, and re
   const none = fakeShotRuntime('linux', { failTools: true });
   const r2 = runTask('screenshot', {}, none);
   assert.equal(r2.ok, false);
-  assert.match(r2.error, /no screenshot tool/);
-  assert.equal(none.calls.length, 3); // import, scrot, gnome-screenshot
+  assert.match(r2.error, /no screenshot tool produced an image/);
+  assert.equal(none.calls.length, 4); // import, grim, scrot, gnome-screenshot
+});
+
+test('screenshot skips capture tools that exit 0 but write no image (Wayland)', () => {
+  const calls = [];
+  const runtime = {
+    platform: 'linux',
+    enableScreenshot: true,
+    maxFileBytes: 32 * 1024,
+    calls,
+    execFileSync(file, args) {
+      calls.push({ file, args });
+      if (file === 'import') return ''; // silent failure: no file written
+      if (file === 'grim') return fs.writeFileSync(args.at(-1), PNG_BYTES), '';
+      throw new Error(`unexpected tool: ${file}`);
+    },
+  };
+  const r = runTask('screenshot', {}, runtime);
+  assert.equal(r.ok, true, r.error ?? '');
+  assert.deepEqual(calls.map((c) => c.file), ['import', 'grim']);
+
+  const mac = fakeShotRuntime('darwin');
+  mac.execFileSync = () => ''; // screencapture exits 0, writes nothing
+  const r2 = runTask('screenshot', {}, mac);
+  assert.equal(r2.ok, false);
+  assert.match(r2.error, /screencapture wrote no image/);
 });
 
 // ---------------------------------------------------------------------------
@@ -306,27 +331,29 @@ test('screenshot honors and validates a per-task width override', () => {
 });
 
 // ---------------------------------------------------------------------------
-// screenshot exfil-by-reference (uploadUrl) mode
+// screenshot exfil-by-reference (uploadUrls fallback chain) mode
 // ---------------------------------------------------------------------------
 
-function fakeUploadShot(uploadResponse, { failUpload = false } = {}) {
+function fakeUploadShot(services) {
+  // services: { endpoint: responseBody } — null response means the upload fails
   const runtime = fakeScaledShot('darwin', { pngBytes: 5_000_000 });
-  runtime.uploadUrl = 'https://0x0.st';
+  runtime.uploadUrls = Object.keys(services);
   const baseExec = runtime.execFileSync;
   runtime.execFileSync = (file, args) => {
     if (file === 'curl') {
       runtime.calls.push({ file, args });
-      if (failUpload) throw new Error('curl: (6) could not resolve host');
-      return uploadResponse;
+      const behavior = services[args.at(-1)];
+      if (behavior == null) throw new Error('curl: (6) could not resolve host');
+      return behavior;
     }
     return baseExec(file, args);
   };
   return runtime;
 }
 
-test('screenshot uploads full-res and returns just the URL when uploadUrl is set', () => {
+test('screenshot uploads full-res and returns just the URL when upload services are set', () => {
   for (const body of ['https://0x0.st/abc123.png\n', '{"success":true,"link":"https://file.io/xyz789"}']) {
-    const runtime = fakeUploadShot(body);
+    const runtime = fakeUploadShot({ 'https://0x0.st': body });
     const r = runTask('screenshot', {}, runtime);
     assert.equal(r.ok, true, r.error ?? '');
     assert.equal(r.file, undefined); // no bytes cross the channel
@@ -341,17 +368,46 @@ test('screenshot uploads full-res and returns just the URL when uploadUrl is set
   }
 });
 
-test('screenshot falls back to channel transfer when the upload fails', () => {
-  const runtime = fakeUploadShot(null, { failUpload: true });
+test('screenshot tries upload services in order until one succeeds', () => {
+  const runtime = fakeUploadShot({
+    'https://0x0.st': null, // down
+    'https://tmpfiles.org/api/v1/upload': '{"status":"success","data":{"url":"https://tmpfiles.org/dl/42/shot.png"}}',
+  });
+  const r = runTask('screenshot', {}, runtime);
+  assert.equal(r.ok, true, r.error ?? '');
+  assert.equal(r.file, undefined);
+  assert.match(r.output, /https:\/\/tmpfiles\.org\/dl\/42\/shot\.png/);
+  assert.match(r.output, /via tmpfiles\.org \(after 1 service failure\(s\)\)/);
+  const curls = runtime.calls.filter((c) => c.file === 'curl');
+  assert.equal(curls.length, 2);
+  assert.equal(curls[0].args.at(-1), 'https://0x0.st');
+});
+
+test('screenshot still honors the legacy single uploadUrl setting', () => {
+  const runtime = fakeUploadShot({ 'https://0x0.st': 'https://0x0.st/abc123.png\n' });
+  delete runtime.uploadUrls;
+  runtime.uploadUrl = 'https://0x0.st';
+  const r = runTask('screenshot', {}, runtime);
+  assert.equal(r.ok, true, r.error ?? '');
+  assert.equal(r.file, undefined);
+  assert.match(r.output, /https:\/\/0x0\.st\//);
+});
+
+test('screenshot falls back to channel transfer when every upload service fails', () => {
+  const runtime = fakeUploadShot({
+    'https://0x0.st': null,
+    'https://tmpfiles.org/api/v1/upload': null,
+  });
   const r = runTask('screenshot', {}, runtime);
   assert.equal(r.ok, true, r.error ?? '');
   assert.equal(r.file.name, 'screenshot.jpg');
-  assert.match(r.output, /upload to 0x0\.st failed \(curl: \(6\) could not resolve host\)/);
+  assert.match(r.output, /all 2 upload service\(s\) failed/);
+  assert.match(r.output, /0x0\.st: curl: \(6\) could not resolve host/);
   assert.match(r.output, /fell back to channel transfer/);
 });
 
 test('screenshot falls back when the upload response has no usable URL', () => {
-  const runtime = fakeUploadShot('{"success":false,"error":"banned filetype"}');
+  const runtime = fakeUploadShot({ 'https://0x0.st': '{"success":false,"error":"banned filetype"}' });
   const r = runTask('screenshot', {}, runtime);
   assert.equal(r.ok, true, r.error ?? '');
   assert.equal(r.file.name, 'screenshot.jpg');

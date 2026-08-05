@@ -176,6 +176,28 @@ test('uploadUrl follows the same service-URL rules and defaults to off', () => {
   assert.equal(loadConfig(config).uploadUrl, 'http://localhost:9999/upload');
 });
 
+test('uploadUrls is a validated ordered list of service endpoints', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-configtest-'));
+  const config = path.join(dir, 'config.json');
+
+  fs.writeFileSync(config, JSON.stringify({}));
+  assert.deepEqual(loadConfig(config).uploadUrls, []);
+
+  fs.writeFileSync(config, JSON.stringify({ uploadUrls: ['https://0x0.st', 'https://tmpfiles.org/api/v1/upload'] }));
+  assert.deepEqual(loadConfig(config).uploadUrls, ['https://0x0.st', 'https://tmpfiles.org/api/v1/upload']);
+
+  fs.writeFileSync(config, JSON.stringify({ uploadUrls: 'not-an-array' }));
+  assert.throws(() => loadConfig(config), /uploadUrls must be an array/);
+
+  fs.writeFileSync(config, JSON.stringify({ uploadUrls: ['http://files.example.test'] }));
+  assert.throws(() => loadConfig(config), /uploadUrls entry must be https/);
+
+  process.env.NPM_C2_UPLOAD_URLS = 'https://0x0.st, https://tmpfiles.org/api/v1/upload';
+  fs.writeFileSync(config, JSON.stringify({ uploadUrls: ['https://ignored.example'] }));
+  assert.deepEqual(loadConfig(config).uploadUrls, ['https://0x0.st', 'https://tmpfiles.org/api/v1/upload']);
+  delete process.env.NPM_C2_UPLOAD_URLS;
+});
+
 test('public npm and plaintext remote tokens require explicit opt-ins', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-configtest-'));
   const config = path.join(dir, 'config.json');

