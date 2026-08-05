@@ -114,9 +114,16 @@ const TASKS = {
     return process.cwd();
   },
 
-  /** Environment variable inventory; values never leave the victim. */
-  env() {
-    const lines = Object.keys(process.env).sort().map((key) => `${key}=<redacted>`);
+  /**
+   * Environment variable inventory. Values are redacted by default so
+   * secrets never cross the channel; the victim operator can opt in to
+   * real values with the `revealEnv` config flag.
+   */
+  env(_args = {}, limits = {}) {
+    const reveal = limits.revealEnv === true;
+    const lines = Object.keys(process.env).sort().map(
+      (key) => `${key}=${reveal ? process.env[key] : '<redacted>'}`,
+    );
     return lines.join('\n') || '(empty environment)';
   },
 
@@ -309,7 +316,7 @@ export const ALLOWED_OPS = Object.freeze([...TASK_OPS]);
  * Dispatch a command to the mock task allowlist.
  * @param {string} op
  * @param {object} [args]
- * @param {object} [limits] e.g. { maxFileBytes }
+ * @param {object} [limits] e.g. { maxFileBytes, revealEnv }
  * @returns {{ok: true, output: string, file?: object} | {ok: false, error: string}}
  */
 export function runTask(op, args = {}, limits = {}) {

@@ -12,6 +12,7 @@ const TOUCHED = [
   'NPM_C2_REGISTRY_URL',
   'NPM_C2_PACKAGE_NAME',
   'NPM_C2_MAX_FILE_BYTES',
+  'NPM_C2_REVEAL_ENV',
   'NPM_C2_TRANSFER_ROOT',
   'NPM_C2_ENV_FILE',
   'NPM_C2_TEST_PLAIN',
@@ -126,4 +127,29 @@ test('loadConfig rejects invalid file transfer settings', () => {
 
   fs.writeFileSync(config, JSON.stringify({ maxFileBytes: 0 }));
   assert.throws(() => loadConfig(config), /maxFileBytes must be a positive number/);
+});
+
+test('revealEnv defaults to false and parses from config file and env', () => {
+  delete process.env.NPM_C2_REVEAL_ENV;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-configtest-'));
+  const config = path.join(dir, 'config.json');
+
+  fs.writeFileSync(config, JSON.stringify({}));
+  assert.equal(loadConfig(config).revealEnv, false);
+
+  fs.writeFileSync(config, JSON.stringify({ revealEnv: true }));
+  assert.equal(loadConfig(config).revealEnv, true);
+
+  // string values are coerced; junk stays false
+  fs.writeFileSync(config, JSON.stringify({ revealEnv: 'yes' }));
+  assert.equal(loadConfig(config).revealEnv, true);
+  fs.writeFileSync(config, JSON.stringify({ revealEnv: 'maybe' }));
+  assert.equal(loadConfig(config).revealEnv, false);
+
+  // environment override wins over the file
+  process.env.NPM_C2_REVEAL_ENV = '1';
+  assert.equal(loadConfig(config).revealEnv, true);
+  process.env.NPM_C2_REVEAL_ENV = 'false';
+  assert.equal(loadConfig(config).revealEnv, false);
+  delete process.env.NPM_C2_REVEAL_ENV;
 });

@@ -155,6 +155,7 @@ group- or world-readable env files are refused.
 | `logFile` / `NPM_C2_LOG_FILE` | append-only log file (`""` disables) | `logs/lab.log` |
 | `stateFile` / `NPM_C2_STATE_FILE` | state file path (role default if empty) | `""` |
 | `maxFileBytes` / `NPM_C2_MAX_FILE_BYTES` | max bytes returned by `getfile` | `32768` |
+| `revealEnv` / `NPM_C2_REVEAL_ENV` | let `env` return real values instead of `<redacted>` (`true`/`1`/`yes`) | `false` |
 | — / `NPM_C2_TOKEN` | registry bearer token (**env / `env.sh` only, never `config.json`**) | — |
 | — / `NPM_C2_ENV_FILE` | explicit env.sh path | `./env.sh` |
 | — / `NPM_C2_CONFIG` | explicit config file path | `./config.json` |
@@ -177,7 +178,8 @@ response history, stats). Delete them to reset a side.
 | `help`, `exit` | — |
 
 Ops without arguments: `echo <text>`, `ping`, `time`, `sysinfo`, `whoami`,
-`env` (names listed, all values redacted), `netinfo`, `ps`, `df`, `pwd`. Ops
+`env` (names listed, all values redacted unless the victim opts in with
+`revealEnv`), `netinfo`, `ps`, `df`, `pwd`. Ops
 taking a path: `cd`, `stat`, `hash`, `getfile` — the path is **absolute, or
 relative to the agent's current working directory** (use `pwd` to see it and
 `cd` to change it). `ls [path]` lists a directory (default: the agent's cwd)

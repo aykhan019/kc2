@@ -78,8 +78,9 @@ current working directory**; `cd` changes that cwd for subsequent tasks,
 returns the file as base64 in the result payload's optional `file` field
 (`{ name, size, dataB64 }`). `hash` returns the SHA-256 of a file (read-only,
 capped at 64 MiB); `ls` is truncated at 200 entries, `find` at 100 matches
-and depth 6, `ps` at 40 rows; `ps`/`df` are unix-only; `env` lists names but
-redacts every value. The attacker CLI reassembles `getfile` results and
+and depth 6, `ps` at 40 rows; `ps`/`df` are unix-only; `env` lists names and
+redacts every value unless the victim operator opts in with the `revealEnv`
+config flag. The attacker CLI reassembles `getfile` results and
 saves them under `downloads/`.
 
 Result payload (JSON):

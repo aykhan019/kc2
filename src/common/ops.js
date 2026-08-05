@@ -20,7 +20,7 @@ export const OP_DEFS = Object.freeze([
   { name: 'time', argSpec: 'none', usage: 'time', summary: 'agent-local time (ISO 8601)' },
   { name: 'sysinfo', argSpec: 'none', usage: 'sysinfo', summary: 'platform, arch, uptime, memory, cpu count' },
   { name: 'whoami', argSpec: 'none', usage: 'whoami', summary: 'user, uid/gid, shell, hostname, pid, node' },
-  { name: 'env', argSpec: 'none', usage: 'env', summary: 'environment variables (secrets redacted)' },
+  { name: 'env', argSpec: 'none', usage: 'env', summary: 'environment variables (values redacted unless revealEnv is set)' },
   { name: 'netinfo', argSpec: 'none', usage: 'netinfo', summary: 'network interfaces and addresses' },
   { name: 'ps', argSpec: 'none', usage: 'ps', summary: 'top processes by memory' },
   { name: 'df', argSpec: 'none', usage: 'df', summary: 'filesystem usage' },

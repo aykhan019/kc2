@@ -157,6 +157,28 @@ test('env lists variable names but never exposes values', () => {
   }
 });
 
+test('env returns real values only when revealEnv is enabled', () => {
+  process.env.NPM_C2_TEST_VISIBLE = 'visible-value';
+  process.env.NPM_C2_TEST_API_TOKEN = 'super-secret';
+  try {
+    const revealed = runTask('env', {}, { revealEnv: true });
+    assert.equal(revealed.ok, true);
+    assert.match(revealed.output, /NPM_C2_TEST_VISIBLE=visible-value/);
+    assert.match(revealed.output, /NPM_C2_TEST_API_TOKEN=super-secret/);
+
+    // explicit false and absent flag behave like the default: redacted
+    for (const limits of [{ revealEnv: false }, {}]) {
+      const r = runTask('env', {}, limits);
+      assert.equal(r.ok, true);
+      assert.match(r.output, /NPM_C2_TEST_VISIBLE=<redacted>/);
+      assert.doesNotMatch(r.output, /visible-value|super-secret/);
+    }
+  } finally {
+    delete process.env.NPM_C2_TEST_VISIBLE;
+    delete process.env.NPM_C2_TEST_API_TOKEN;
+  }
+});
+
 test('netinfo lists at least one interface address', () => {
   const r = runTask('netinfo');
   assert.equal(r.ok, true);
