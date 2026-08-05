@@ -356,6 +356,9 @@ async function main() {
   let registryFresh = false;
   let presenceEpoch = 0;
   let cleaning = false;
+  // First time each incomplete result group was observed, so a result whose
+  // chunks were lost in transit stops nagging once the task TTL has passed.
+  const incompleteFirstSeen = new Map();
 
   function printPendingTasks() {
     const pending = pendingDirectTasks(state.history, {
@@ -431,9 +434,19 @@ async function main() {
         if (state.seenResults.includes(key)) continue;
         const total = parts[0].total;
         if (new Set(parts.map((p) => p.chunk)).size !== total) {
-          incomplete.push(`${key}: waiting for chunks (${new Set(parts.map((p) => p.chunk)).size}/${total})`);
+          const firstSeen = incompleteFirstSeen.get(key) ?? observedAt;
+          incompleteFirstSeen.set(key, firstSeen);
+          const have = new Set(parts.map((p) => p.chunk)).size;
+          if (observedAt - firstSeen >= timings.taskTtlMs) {
+            incomplete.push(`${key}: result incomplete (${have}/${total} chunks) after the task TTL — giving up, result lost`);
+            state.seenResults.push(key);
+            incompleteFirstSeen.delete(key);
+            continue;
+          }
+          incomplete.push(`${key}: waiting for chunks (${have}/${total})`);
           continue;
         }
+        incompleteFirstSeen.delete(key);
         try {
           const result = reassembleResult(parts);
           const a = parts[0].agentId;
@@ -447,6 +460,9 @@ async function main() {
         } catch (err) {
           logger.warn(`failed to reassemble ${key}: ${err.message}`);
         }
+      }
+      for (const key of incompleteFirstSeen.keys()) {
+        if (!groups.has(key)) incompleteFirstSeen.delete(key);
       }
       for (const tag of expiredCommandTags) {
         try {

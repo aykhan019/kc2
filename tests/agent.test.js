@@ -10,6 +10,7 @@ import {
   loadState,
   processDistTags,
   publishHeartbeat,
+  publishResultTags,
   runHeartbeatLoop,
   saveState,
   selectCommands,
@@ -50,14 +51,20 @@ class FakeClient {
     this.setCalls = [];
     this.deleteCalls = [];
     this.events = [];
+    this.tags = new Map(); // simulated registry contents
   }
   async setDistTag(tag, version) {
     this.setCalls.push([tag, version]);
     this.events.push(['set', tag]);
+    this.tags.set(tag, version);
   }
   async deleteDistTag(tag) {
     this.deleteCalls.push(tag);
     this.events.push(['delete', tag]);
+    this.tags.delete(tag);
+  }
+  async getDistTags() {
+    return Object.fromEntries(this.tags);
   }
 }
 
@@ -277,6 +284,55 @@ test('large task output is published as multiple chunk tags', async () => {
     assert.ok(tag.length <= 214);
     assert.match(tag, /^x-res-a1b2c3d4-1-\d+of\d+-/);
   }
+});
+
+test('silently dropped result chunks are re-published until visible', async () => {
+  // registries can lose a dist-tag write that returned success when another
+  // writer updates the package concurrently (observed on registry.npmjs.org)
+  const cmdTag = encodeCommandTag(AGENT, 1, { op: 'sysinfo' });
+  const state = defaultState();
+  const client = new FakeClient();
+  const baseSet = client.setDistTag.bind(client);
+  const dropped = new Set();
+  client.setDistTag = async (tag, version) => {
+    // silently drop every chunk once: the write "succeeds" but never lands
+    if (!dropped.has(tag)) {
+      dropped.add(tag);
+      client.setCalls.push([tag, version]);
+      return;
+    }
+    return baseSet(tag, version);
+  };
+  const stats = await processDistTags({
+    distTags: { [cmdTag]: '1.0.0' },
+    state,
+    agentId: AGENT,
+    client,
+    logger: silentLogger,
+  });
+  assert.equal(stats.resultsPublished, 1);
+  const published = client.setCalls.map(([tag]) => tag);
+  for (const tag of new Set(published)) {
+    assert.ok(tag in (await client.getDistTags()), `chunk missing from registry: ${tag}`);
+  }
+  assert.ok(published.length > new Set(published).size, 'lost chunks must be re-published');
+});
+
+test('publishResultTags gives up after bounded rounds when chunks never stick', async () => {
+  const client = {
+    setCalls: 0,
+    async setDistTag() {
+      this.setCalls++;
+    },
+    async getDistTags() {
+      return {}; // nothing ever lands
+    },
+  };
+  await assert.rejects(
+    () => publishResultTags(client, ['x-res-a-1-1of2-AAAA', 'x-res-a-1-2of2-BBBB'], { logger: silentLogger }),
+    /2\/2 result chunk\(s\) lost after 3 publish attempts/,
+  );
+  assert.equal(client.setCalls, 6, '2 chunks x 3 rounds');
 });
 
 test('direct commands require a recent heartbeat lease without comparing host clocks', async () => {

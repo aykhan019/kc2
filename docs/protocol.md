@@ -141,6 +141,14 @@ npm caps dist-tag names at **214 characters**. The encoder enforces this:
   and persists state after every change. If publishing fails, the result may
   be lost, but the command will **not** be re-executed after a restart —
   at-most-once execution is preferred over at-least-once delivery.
+- Dist-tag writes are serialized per process: registries apply tag writes as
+  read-modify-write on the whole package document, and overlapping writes
+  from the same process silently clobber each other (observed on
+  registry.npmjs.org: a PUT returns 2xx yet the tag never appears).
+- After publishing, the victim reads the tag map back and re-publishes any
+  chunk that was silently dropped (bounded retries). The attacker gives up
+  waiting for an incomplete result once the task TTL has passed and reports
+  it as lost instead of waiting forever.
 - Malformed tags are logged and skipped on both sides; they never abort a
   poll cycle.
 - Direct commands with a lease older than the victim's four-heartbeat window

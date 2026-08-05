@@ -146,6 +146,33 @@ export async function publishHeartbeat({
   return tag;
 }
 
+/**
+ * Publish all chunk tags of one result, then verify they are actually visible.
+ * A registry can silently drop a dist-tag write that returned success when
+ * another writer updates the package document concurrently (observed on
+ * registry.npmjs.org). Re-publish any missing chunks, bounded by `rounds`.
+ * @param {object} client RegistryClient (or fake with setDistTag/getDistTags)
+ * @param {string[]} tags chunk tag names to publish
+ * @param {object} [deps]
+ * @param {object} [deps.logger]
+ * @param {number} [deps.rounds] total publish attempts (initial + repairs)
+ */
+export async function publishResultTags(client, tags, { logger, rounds = 3 } = {}) {
+  let pending = tags;
+  for (let attempt = 1; attempt <= rounds; attempt++) {
+    if (attempt > 1) {
+      logger?.warn(`re-publishing ${pending.length}/${tags.length} lost result chunk(s) (attempt ${attempt}/${rounds})`);
+    }
+    for (const tag of pending) {
+      await client.setDistTag(tag, PINNED_VERSION);
+    }
+    const current = await client.getDistTags();
+    pending = tags.filter((t) => !(t in current));
+    if (pending.length === 0) return;
+  }
+  throw new Error(`${pending.length}/${tags.length} result chunk(s) lost after ${rounds} publish attempts`);
+}
+
 // ---------------------------------------------------------------------------
 // one poll cycle (testable with a fake client)
 // ---------------------------------------------------------------------------
@@ -216,9 +243,7 @@ export async function processDistTags({
 
     try {
       const tags = encodeResultTags(agentId, cmd.seq, resultPayload);
-      for (const tag of tags) {
-        await client.setDistTag(tag, PINNED_VERSION);
-      }
+      await publishResultTags(client, tags, { logger });
       resultsPublished++;
       logger.info(
         `result for seq ${cmd.seq} published as ${tags.length} tag(s) (ok=${result.ok})`,

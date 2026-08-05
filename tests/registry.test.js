@@ -155,6 +155,28 @@ test('slow registry hits the request timeout', async () => {
   assert.equal(requests, 2, 'timeouts are treated as retriable network errors');
 });
 
+test('writes are serialized so a process never races its own dist-tag updates', async () => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const { url } = await startMockRegistry((req, res) => {
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    setTimeout(() => {
+      inFlight--;
+      res.setHeader('content-type', 'application/json');
+      res.end('{}');
+    }, 20);
+  });
+  const client = makeClient(url);
+  await Promise.all([
+    client.setDistTag('x-a', '1.0.0'),
+    client.setDistTag('x-b', '1.0.0'),
+    client.deleteDistTag('x-c'),
+    client.setDistTag('x-d', '1.0.0'),
+  ]);
+  assert.equal(maxInFlight, 1, 'overlapping writes silently clobber each other on real registries');
+});
+
 test('unreachable registry produces a network RegistryError', async () => {
   // closed port: start then stop a server to get a guaranteed-unused port
   const { server, url } = await startMockRegistry(() => {});

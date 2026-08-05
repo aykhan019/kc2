@@ -50,6 +50,18 @@ export class RegistryClient {
     this.baseDelayMs = baseDelayMs;
     this.fetchImpl = fetchImpl;
     this.logger = logger;
+    // Registries apply dist-tag writes as read-modify-write on the whole
+    // package document. Two overlapping writes from the same process silently
+    // clobber each other (observed on registry.npmjs.org: a PUT returns 2xx
+    // yet the tag never appears). Serialize all writes from this client so a
+    // process never races itself (e.g. heartbeat vs result chunk storm).
+    this._writeQueue = Promise.resolve();
+  }
+
+  #enqueueWrite(op) {
+    const result = this._writeQueue.then(() => op());
+    this._writeQueue = result.catch(() => {});
+    return result;
   }
 
   #url(pathSuffix = '') {
@@ -139,13 +151,17 @@ export class RegistryClient {
    * package — this lab always uses PINNED_VERSION.
    */
   async setDistTag(tag, version) {
-    await this.#request(`/${encodeURIComponent(tag)}`, {
-      method: 'PUT',
-      body: JSON.stringify(version),
-    });
+    return this.#enqueueWrite(() =>
+      this.#request(`/${encodeURIComponent(tag)}`, {
+        method: 'PUT',
+        body: JSON.stringify(version),
+      }),
+    );
   }
 
   async deleteDistTag(tag) {
-    await this.#request(`/${encodeURIComponent(tag)}`, { method: 'DELETE' });
+    return this.#enqueueWrite(() =>
+      this.#request(`/${encodeURIComponent(tag)}`, { method: 'DELETE' }),
+    );
   }
 }
