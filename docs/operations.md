@@ -13,9 +13,10 @@ registry are the supported default.
 2. Run `npm ci` and `npm run check`.
 3. Confirm the package and registry are disposable and operator-owned.
 4. Use a short-lived token scoped to that single package.
-5. Keep `revealEnv`, `enableFunOps`, and public/insecure registry opt-ins off
-   unless the exercise specifically requires them.
-6. Set `filesystemRoot` to a dedicated directory containing only lab data.
+5. Keep `revealEnv`, `enableFunOps`, `enableScreenshot`, and public/insecure
+   registry opt-ins off unless the exercise specifically requires them.
+6. Run the victim in a dedicated directory containing only lab data; path
+   operations are not confined to a filesystem root.
 
 ## Supported local deployment
 

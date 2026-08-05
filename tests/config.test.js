@@ -16,7 +16,6 @@ const TOUCHED = [
   'NPM_C2_ENABLE_FUN_OPS',
   'NPM_C2_ALLOW_PUBLIC_REGISTRY',
   'NPM_C2_ALLOW_INSECURE_HTTP',
-  'NPM_C2_FILESYSTEM_ROOT',
   'NPM_C2_DOWNLOAD_DIR',
   'NPM_C2_LOG_LEVEL',
   'NPM_C2_LOG_FILE',
@@ -132,9 +131,9 @@ test('loadConfig picks up token and overrides via env.sh (NPM_C2_ENV_FILE)', () 
 test('production safety settings are secure by default and paths resolve absolutely', () => {
   const cfg = loadConfig('/nonexistent/config.json');
   assert.equal(cfg.enableFunOps, false);
+  assert.equal(cfg.enableScreenshot, false);
   assert.equal(cfg.allowPublicRegistry, false);
   assert.equal(cfg.allowInsecureHttp, false);
-  assert.equal(cfg.filesystemRoot, process.cwd());
   assert.equal(cfg.downloadDir, path.resolve('downloads'));
   assert.equal(cfg.logLevel, 'info');
   assert.equal(cfg.requestTimeoutMs, 10_000);

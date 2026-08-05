@@ -159,9 +159,9 @@ The table lists built-in defaults. `config.example.json` intentionally enables
 | `stateFile` / `NPM_C2_STATE_FILE` | state file path (role default if empty) | `""` |
 | `maxFileBytes` / `NPM_C2_MAX_FILE_BYTES` | max bytes returned by `getfile` (hard cap 1 MiB) | `32768` |
 | `revealEnv` / `NPM_C2_REVEAL_ENV` | let `env` return real values instead of `<redacted>` (`true`/`1`/`yes`) | `false` |
-| `filesystemRoot` / `NPM_C2_FILESYSTEM_ROOT` | realpath boundary for path operations | `.` |
 | `downloadDir` / `NPM_C2_DOWNLOAD_DIR` | attacker destination for received files | `downloads` |
 | `enableFunOps` / `NPM_C2_ENABLE_FUN_OPS` | enable attended-host desktop actions | `false` |
+| `enableScreenshot` / `NPM_C2_ENABLE_SCREENSHOT` | enable the `screenshot` task (captures the whole screen) | `false` |
 | `allowPublicRegistry` / `NPM_C2_ALLOW_PUBLIC_REGISTRY` | opt in to `registry.npmjs.org` | `false` |
 | `allowInsecureHttp` / `NPM_C2_ALLOW_INSECURE_HTTP` | permit token use over non-loopback HTTP | `false` |
 | `logLevel` / `NPM_C2_LOG_LEVEL` | `debug`/`info`/`warn`/`error` | `info` |
@@ -193,10 +193,14 @@ Ops without arguments: `echo <text>`, `ping`, `time`, `sysinfo`, `whoami`,
 `env` (names listed, all values redacted unless the victim opts in with
 `revealEnv`), `netinfo`, `ps`, `df`, `pwd`. Ops
 taking a path: `cd`, `stat`, `hash`, `getfile` — the path is **absolute, or
-relative to the agent's current working directory**, but its real target must
-remain under `filesystemRoot` (use `pwd` to see the cwd and `cd` to change it).
+relative to the agent's current working directory** (use `pwd` to see the cwd
+and `cd` to change it).
 `ls [path]` lists a directory (default: the agent's cwd)
-and `find <dir> <text>` searches file names recursively. The allowlist is
+and `find <dir> <text>` searches file names recursively. `screenshot` captures
+the whole screen (all displays) with OS built-in tools and transfers the PNG
+back like `getfile` (size-capped by `maxFileBytes`); it requires
+`enableScreenshot=true` on the victim, and on macOS the agent's terminal needs
+Screen Recording permission. The allowlist is
 data-driven: `src/common/ops.js` holds each op's name, usage, argument spec,
 and help summary — adding an op is one entry there plus one handler under
 `src/victim/`.

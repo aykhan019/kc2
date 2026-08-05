@@ -22,7 +22,7 @@ test('allowlist contains exactly the documented ops', () => {
     [
       'beep', 'bounce', 'cd', 'df', 'echo', 'env', 'find', 'getfile', 'hash', 'ls',
       'netinfo', 'notify', 'openurl', 'party', 'ping', 'ps', 'pwd', 'rickroll',
-      'say', 'stat', 'sysinfo', 'time', 'volume', 'whoami',
+      'say', 'screenshot', 'stat', 'sysinfo', 'time', 'volume', 'whoami',
     ],
   );
 });
@@ -32,6 +32,75 @@ test('fun ops are categorized for help output', () => {
     OP_DEFS.filter((op) => op.group === 'fun').map((op) => op.name),
     ['openurl', 'say', 'notify', 'beep', 'bounce', 'volume', 'rickroll', 'party'],
   );
+  assert.deepEqual(
+    OP_DEFS.filter((op) => op.group === 'screen').map((op) => op.name),
+    ['screenshot'],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// screenshot (gated; all captures use a fake process runner)
+// ---------------------------------------------------------------------------
+
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function fakeShotRuntime(platform, { failTools = false } = {}) {
+  const calls = [];
+  return {
+    platform,
+    enableScreenshot: true,
+    calls,
+    execFileSync(file, args) {
+      calls.push({ file, args });
+      if (failTools) {
+        const err = new Error(`${file} unavailable`);
+        err.code = 'ENOENT';
+        throw err;
+      }
+      // The capture tool's output path is always the last argv element.
+      fs.writeFileSync(args[args.length - 1], PNG_BYTES);
+      return '';
+    },
+  };
+}
+
+test('screenshot is disabled unless enableScreenshot is set', () => {
+  for (const limits of [{}, { enableScreenshot: false }]) {
+    const r = runTask('screenshot', {}, limits);
+    assert.equal(r.ok, false);
+    assert.match(r.error, /disabled/);
+  }
+});
+
+test('screenshot captures per-OS and transfers the PNG like getfile', () => {
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    const runtime = fakeShotRuntime(platform);
+    const r = runTask('screenshot', {}, runtime);
+    assert.equal(r.ok, true, r.error ?? '');
+    assert.equal(r.file.name, 'screenshot.png');
+    assert.equal(r.file.size, PNG_BYTES.length);
+    assert.deepEqual(Buffer.from(r.file.dataB64, 'base64'), PNG_BYTES);
+    const tool = runtime.calls[0].file;
+    assert.equal(
+      tool,
+      platform === 'darwin' ? 'screencapture'
+        : platform === 'linux' ? 'import'
+          : 'powershell.exe',
+    );
+  }
+});
+
+test('screenshot enforces maxFileBytes and reports missing tools', () => {
+  const small = { ...fakeShotRuntime('darwin'), maxFileBytes: 4 };
+  const r1 = runTask('screenshot', {}, small);
+  assert.equal(r1.ok, false);
+  assert.match(r1.error, /too large/);
+
+  const none = fakeShotRuntime('linux', { failTools: true });
+  const r2 = runTask('screenshot', {}, none);
+  assert.equal(r2.ok, false);
+  assert.match(r2.error, /no screenshot tool/);
+  assert.equal(none.calls.length, 3); // import, scrot, gnome-screenshot
 });
 
 test('unknown op is rejected, never executed', () => {
@@ -48,25 +117,22 @@ test('fun ops are disabled when the runtime does not explicitly enable them', ()
   assert.match(result.error, /disabled/);
 });
 
-test('filesystem root blocks lexical and symlink escapes', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-root-'));
+test('path ops resolve absolute and cwd-relative paths via realpath', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-root-'));
+  fs.writeFileSync(path.join(dir, 'inside.txt'), 'inside');
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-outside-'));
-  fs.writeFileSync(path.join(root, 'inside.txt'), 'inside');
-  fs.writeFileSync(path.join(outside, 'secret.txt'), 'outside');
+  fs.writeFileSync(path.join(outside, 'other.txt'), 'outside');
   if (process.platform !== 'win32') {
-    fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'escape.txt'));
+    fs.symlinkSync(path.join(outside, 'other.txt'), path.join(dir, 'link.txt'));
   }
 
-  assert.equal(runTask('hash', { path: path.join(root, 'inside.txt') }, { filesystemRoot: root }).ok, true);
-  for (const candidate of [path.join(root, '..', path.basename(outside), 'secret.txt'), path.join(outside, 'secret.txt')]) {
-    const result = runTask('getfile', { path: candidate }, { filesystemRoot: root });
-    assert.equal(result.ok, false);
-    assert.match(result.error, /filesystem root/);
-  }
+  assert.equal(runTask('hash', { path: path.join(dir, 'inside.txt') }).ok, true);
+  // No filesystem root: any readable absolute path is fair game.
+  assert.equal(runTask('hash', { path: path.join(outside, 'other.txt') }).ok, true);
   if (process.platform !== 'win32') {
-    const result = runTask('getfile', { path: path.join(root, 'escape.txt') }, { filesystemRoot: root });
-    assert.equal(result.ok, false);
-    assert.match(result.error, /filesystem root/);
+    const r = runTask('stat', { path: path.join(dir, 'link.txt') });
+    assert.equal(r.ok, true);
+    assert.match(r.output, new RegExp(outside.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 });
 

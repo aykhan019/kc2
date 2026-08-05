@@ -37,6 +37,15 @@ Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object {
   $pct=if ($size -gt 0) { [Math]::Round(100*$used/$size) } else { 0 };
   '{0} {1:N0} {2:N0} {3:N0} {4}% {0}' -f $_.DeviceID,$size,$used,$free,$pct;
 }`;
+// Captures the entire virtual screen (every display, not just the desktop
+// window). The output path arrives as argv — nothing is interpolated.
+const WINDOWS_SCREENSHOT_SCRIPT = `
+Add-Type -AssemblyName System.Windows.Forms,System.Drawing;
+$v=[System.Windows.Forms.SystemInformation]::VirtualScreen;
+$b=New-Object System.Drawing.Bitmap $v.Width,$v.Height;
+$g=[System.Drawing.Graphics]::FromImage($b);
+$g.CopyFromScreen($v.Left,$v.Top,0,0,$b.Size);
+$b.Save($args[0],[System.Drawing.Imaging.ImageFormat]::Png);`;
 
 function positiveLimit(value, fallback) {
   const n = Number(value);
@@ -52,22 +61,14 @@ function safeValue(fn, fallback = '?') {
 }
 
 /**
- * Resolve a task path against the agent cwd and enforce the optional realpath
- * root boundary, including for symlink targets.
+ * Resolve a task path against the agent cwd. The realpath is returned so
+ * symlink targets are reported (and read) as their real location.
  */
-function resolvePath(requestedPath, limits = {}) {
+function resolvePath(requestedPath, _limits = {}) {
   const p = typeof requestedPath === 'string' ? requestedPath.trim() : '';
   if (!p) throw new Error('a path argument is required');
   if (p.includes('\0')) throw new Error('path contains NUL byte');
-  const resolved = fs.realpathSync(path.resolve(process.cwd(), p));
-  if (limits.filesystemRoot) {
-    const root = fs.realpathSync(path.resolve(limits.filesystemRoot));
-    const relative = path.relative(root, resolved);
-    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-      throw new Error(`path escapes configured filesystem root: ${root}`);
-    }
-  }
-  return resolved;
+  return fs.realpathSync(path.resolve(process.cwd(), p));
 }
 
 function describeEntry(dir, name) {
@@ -308,6 +309,68 @@ const TASKS = {
     };
   },
 
+  /**
+   * Capture the whole screen (all displays, not only the desktop window) with
+   * OS built-in tools — no dependencies. The PNG rides back exactly like a
+   * getfile transfer, capped by maxFileBytes. The temp file never touches the
+   * configured filesystem root and is always removed afterwards.
+   * Gated behind the enableScreenshot config flag; run it only on an
+   * attended lab host. On macOS the agent's terminal needs Screen Recording
+   * permission, otherwise screencapture fails or returns a blank image.
+   */
+  screenshot(_args = {}, options = {}) {
+    const platform = options.platform ?? process.platform;
+    const exec = options.execFileSync ?? execFileSync;
+    const tmp = path.join(
+      fs.realpathSync(os.tmpdir()),
+      `kc2-shot-${process.pid}-${crypto.randomBytes(4).toString('hex')}.png`,
+    );
+    const EXEC_OPTS = { encoding: 'utf8', timeout: 15_000, windowsHide: true };
+    try {
+      if (platform === 'darwin') {
+        exec('screencapture', ['-x', '-t', 'png', tmp], EXEC_OPTS);
+      } else if (platform === 'linux') {
+        const candidates = [
+          ['import', ['-window', 'root', tmp]], // ImageMagick
+          ['scrot', [tmp]],
+          ['gnome-screenshot', ['-f', tmp]],
+        ];
+        let captured = false;
+        for (const [file, args] of candidates) {
+          try {
+            exec(file, args, EXEC_OPTS);
+            captured = true;
+            break;
+          } catch {
+            // Try the next common X11 screenshot utility.
+          }
+        }
+        if (!captured) {
+          throw new Error(`no screenshot tool found; tried ${candidates.map(([f]) => f).join(', ')}`);
+        }
+      } else if (platform === 'win32') {
+        exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SCREENSHOT_SCRIPT, tmp], EXEC_OPTS);
+      } else {
+        throw new Error(`screenshot is not supported on ${platform}`);
+      }
+      const st = fs.statSync(tmp);
+      const max = positiveLimit(options.maxFileBytes, DEFAULT_MAX_FILE_BYTES);
+      if (st.size > max) {
+        throw new Error(
+          `screenshot too large: ${st.size} bytes (cap ${max}) — raise maxFileBytes; ` +
+            'the dist-tag channel moves ~130 bytes per tag, so full-screen images are slow',
+        );
+      }
+      const data = fs.readFileSync(tmp);
+      return {
+        output: `screen captured (${st.size} bytes PNG)`,
+        file: { name: 'screenshot.png', size: st.size, dataB64: data.toString('base64') },
+      };
+    } finally {
+      fs.rmSync(tmp, { force: true });
+    }
+  },
+
   openurl: (args, options) => runFunTask('openurl', args, options),
   say: (args, options) => runFunTask('say', args, options),
   notify: (args, options) => runFunTask('notify', args, options),
@@ -337,6 +400,9 @@ export function runTask(op, args = {}, limits = {}) {
   }
   if (getOpDef(op)?.group === 'fun' && limits.enableFunOps === false) {
     return { ok: false, error: `task "${op}" is disabled; set enableFunOps only on an attended lab host` };
+  }
+  if (getOpDef(op)?.group === 'screen' && limits.enableScreenshot !== true) {
+    return { ok: false, error: `task "${op}" is disabled; set enableScreenshot only on an attended lab host` };
   }
   try {
     const r = fn(args, limits);

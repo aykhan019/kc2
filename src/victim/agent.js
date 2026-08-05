@@ -280,6 +280,9 @@ async function main() {
   if (cfg.revealEnv) {
     logger.warn('revealEnv is ON — the env task returns real values; secrets may cross the channel');
   }
+  if (cfg.enableScreenshot) {
+    logger.warn('enableScreenshot is ON — the screenshot task can capture everything on screen');
+  }
   if (!cfg.token) {
     logger.warn('NPM_C2_TOKEN is not set — result publishing will fail with 401');
   }
@@ -329,8 +332,8 @@ async function main() {
         limits: {
           maxFileBytes: cfg.maxFileBytes,
           revealEnv: cfg.revealEnv,
-          filesystemRoot: cfg.filesystemRoot,
           enableFunOps: cfg.enableFunOps,
+          enableScreenshot: cfg.enableScreenshot,
         },
       });
       if (stats.executed > 0 || stats.skipped > 0) {

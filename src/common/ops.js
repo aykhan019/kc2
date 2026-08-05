@@ -31,6 +31,7 @@ export const OP_DEFS = Object.freeze([
   { name: 'find', argSpec: 'path+query', usage: 'find <dir> <text>', summary: 'files under dir whose name contains text' },
   { name: 'hash', argSpec: 'path', usage: 'hash <file>', summary: 'SHA-256 of a file (read-only, <= 64 MiB)' },
   { name: 'getfile', argSpec: 'path', usage: 'getfile <file>', summary: 'transfer a file back (base64, size-capped)' },
+  { name: 'screenshot', group: 'screen', argSpec: 'none', usage: 'screenshot', summary: 'capture the screen and transfer the PNG back (size-capped)' },
   { name: 'openurl', group: 'fun', argSpec: 'url', usage: 'openurl <url>', summary: 'open an http(s) URL in the default browser' },
   { name: 'say', group: 'fun', argSpec: 'text!', usage: 'say <text>', summary: 'speak up to 200 characters' },
   { name: 'notify', group: 'fun', argSpec: 'text!', usage: 'notify <text>', summary: 'show a desktop notification' },

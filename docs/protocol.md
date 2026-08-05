@@ -70,11 +70,10 @@ Command payload (JSON):
 `op` is restricted to the victim's hard-coded mock allowlist (defined with
 usage/argument metadata in `src/common/ops.js`: `echo`, `ping`, `time`,
 `sysinfo`, `whoami`, `env`, `netinfo`, `ps`, `df`, `pwd`, `cd`, `ls`, `stat`,
-`find`, `hash`, `getfile`, `openurl`, `say`, `notify`, `beep`, `bounce`,
+`find`, `hash`, `getfile`, `screenshot`, `openurl`, `say`, `notify`, `beep`, `bounce`,
 `volume`, `rickroll`, `party`). Anything else is answered with `ok: false`.
 Path-taking ops accept an **absolute path, or a path relative to the agent's
-current working directory**, but the real resolved target must remain inside
-the configured `filesystemRoot`; symlinks cannot escape it. `cd` changes the
+current working directory**; symlinks resolve to their real target. `cd` changes the
 cwd for subsequent tasks and `pwd` reports it. `getfile` enforces
 `maxFileBytes` (default 32 KiB, hard cap 1 MiB) and
 returns the file as base64 in the result payload's optional `file` field

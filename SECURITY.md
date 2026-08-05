@@ -23,10 +23,11 @@ one disposable package.
 ## Security boundaries
 
 - Public npm use and non-loopback plaintext HTTP require explicit opt-ins.
-- Path operations are confined to `filesystemRoot`, including through
-  symlinks. Set this to a dedicated directory, never `/`.
-- Desktop-affecting operations and environment-value disclosure are disabled
-  by default.
+- Path operations resolve relative to the agent's working directory but are
+  not confined to a filesystem root; run the victim in a dedicated lab
+  directory and never as a privileged user.
+- Desktop-affecting operations, screen capture, and environment-value
+  disclosure are disabled by default.
 - State, logs, and downloaded files are written with private permissions on
   POSIX systems.
 - The local lab binds the registry to loopback and shares a lab-only token
