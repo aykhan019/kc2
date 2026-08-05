@@ -7,5 +7,6 @@ env.sh
 victim-state.json
 attacker-state.json
 *-state.json
+.lab-token
 npm-debug.log*
 repomix-output.md

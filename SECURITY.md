@@ -29,9 +29,9 @@ one disposable package.
   by default.
 - State, logs, and downloaded files are written with private permissions on
   POSIX systems.
-- The Docker profile is local-only, non-root, capability-dropped, read-only,
-  and attached to an internal network. Its shared token is still a lab
-  convenience, not a production credential-distribution design.
+- The local lab binds the registry to loopback and shares a lab-only token
+  between the two sides. That token is a lab convenience, not a production
+  credential-distribution design.
 
 See [`docs/operations.md`](docs/operations.md) for deployment, rotation,
 backup, upgrade, and incident procedures.

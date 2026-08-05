@@ -1,9 +1,9 @@
 #!/bin/sh
-# Seed the local verdaccio registry for the lab:
+# Seed a local npm registry (e.g. `npx verdaccio` on :4873) for the lab:
 #   1. wait for the registry to come up
 #   2. create (or log in as) a lab user and grab a bearer token
 #   3. publish the placeholder package my-package@1.0.0
-#   4. write the token to a shared volume for the victim/attacker containers
+#   4. write the token to a local file for the victim/attacker processes
 #
 # This token sharing is a LAB CONVENIENCE ONLY. In a real engagement the
 # attacker and victim would have independently obtained write access to the
@@ -11,8 +11,8 @@
 set -eu
 umask 077
 
-REGISTRY_URL="${REGISTRY_URL:-http://registry:4873}"
-SHARED_DIR="${SHARED_DIR:-/shared}"
+REGISTRY_URL="${REGISTRY_URL:-http://localhost:4873}"
+TOKEN_FILE="${TOKEN_FILE:-./.lab-token}"
 USER_NAME="${LAB_USER:-lab}"
 USER_PASS="${LAB_PASS:-}"
 USER_EMAIL="${LAB_EMAIL:-lab@example.com}"
@@ -37,10 +37,10 @@ echo "[setup] registry is up"
 # Reuse a previously issued token if it still works. Verdaccio 6 refuses to
 # issue a new token for an existing user via the adduser endpoint (HTTP 409),
 # so "register-or-login" is NOT idempotent there — reusing the persisted
-# token from the shared volume is what makes re-runs work.
+# token file is what makes re-runs work.
 TOKEN=""
-if [ -f "${SHARED_DIR}/token" ]; then
-  CANDIDATE="$(cat "${SHARED_DIR}/token")"
+if [ -f "$TOKEN_FILE" ]; then
+  CANDIDATE="$(cat "$TOKEN_FILE")"
   if node -e '
     const [url, token] = process.argv.slice(1);
     fetch(`${url}/-/whoami`, { headers: { authorization: `Bearer ${token}` } })
@@ -48,7 +48,7 @@ if [ -f "${SHARED_DIR}/token" ]; then
       .catch(() => process.exit(1));
   ' "$REGISTRY_URL" "$CANDIDATE"; then
     TOKEN="$CANDIDATE"
-    echo "[setup] reusing existing token from ${SHARED_DIR}/token"
+    echo "[setup] reusing existing token from ${TOKEN_FILE}"
   else
     echo "[setup] existing token is no longer valid, re-registering"
   fi
@@ -73,8 +73,8 @@ fetch(`${url}/-/user/org.couchdb.user:${name}`, {
 }).catch((err) => { console.error(`user setup failed: ${err.message}`); process.exit(1); });
 ' "$REGISTRY_URL" "$USER_NAME" "$USER_PASS" "$USER_EMAIL")"; then
     echo "[setup] hint: a 409 means the user already exists but no valid token" >&2
-    echo "[setup] was found in the shared volume. Reset the lab with:" >&2
-    echo "[setup]   docker compose -f docker/docker-compose.yml down -v" >&2
+    echo "[setup] was found in ${TOKEN_FILE}. Reset the lab by deleting that file" >&2
+    echo "[setup] and the registry's storage, then re-run this script." >&2
     exit 1
   fi
   echo "[setup] got auth token"
@@ -111,7 +111,7 @@ else
   npm publish --registry "$REGISTRY_URL" --userconfig "${SEED_DIR}/.npmrc" "$SEED_DIR" --loglevel=warn
 fi
 
-mkdir -p "$SHARED_DIR"
-printf '%s' "$TOKEN" > "${SHARED_DIR}/token"
+printf '%s' "$TOKEN" > "$TOKEN_FILE"
+chmod 600 "$TOKEN_FILE"
 rm -rf "$SEED_DIR"
-echo "[setup] done — token written to ${SHARED_DIR}/token"
+echo "[setup] done — token written to ${TOKEN_FILE}"

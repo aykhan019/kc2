@@ -14,7 +14,6 @@
     "lint": "node scripts/check-source.mjs",
     "test": "node --test",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-include=src/**/*.js --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-functions=80",
-    "test:e2e": "sh scripts/smoke-test.sh",
     "check": "npm run lint && npm run test:coverage"
   },
   "keywords": [

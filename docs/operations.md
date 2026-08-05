@@ -4,57 +4,52 @@
 
 "Production ready" here means repeatable and safely operated as an authorized
 research lab. It does not mean suitable for persistence, covert access, or
-control of third-party systems. The local Docker profile is the supported
-default.
+control of third-party systems. Local processes against a local verdaccio
+registry are the supported default.
 
 ## Preflight
 
-1. Use Node.js 22 or 24 LTS, or current Docker/Compose.
-2. Run `npm ci`, `npm run check`, and `npm run test:e2e`.
+1. Use Node.js 22 or 24 LTS.
+2. Run `npm ci` and `npm run check`.
 3. Confirm the package and registry are disposable and operator-owned.
 4. Use a short-lived token scoped to that single package.
 5. Keep `revealEnv`, `enableFunOps`, and public/insecure registry opt-ins off
    unless the exercise specifically requires them.
 6. Set `filesystemRoot` to a dedicated directory containing only lab data.
 
-## Supported Docker deployment
+## Supported local deployment
 
 ```sh
-docker compose -f docker/docker-compose.yml up -d registry setup victim
-docker compose -f docker/docker-compose.yml run --rm attacker
-docker compose -f docker/docker-compose.yml ps
-docker compose -f docker/docker-compose.yml logs --tail=100 registry victim
+npx verdaccio &                     # local registry on 127.0.0.1:4873
+sh scripts/setup-registry.sh        # creates user, publishes my-package@1.0.0
+npm run victim                      # terminal 1
+npm run attacker                    # terminal 2
 ```
 
-The registry is published only on `127.0.0.1:4873`. Application containers
-run as the image's unprivileged `node` user with all Linux capabilities
-dropped, a read-only root filesystem, private writable volumes, and an
-internal network. Image inputs are digest-pinned; Dependabot tracks updates.
+Run verdaccio bound to loopback only, with its default config and a dedicated
+storage directory. The seed script generates a random lab password when
+`LAB_PASS` is not supplied and writes the bearer token to `./.lab-token`
+(mode 600, git-ignored); put it in `env.sh` or export it as `NPM_C2_TOKEN` for
+both processes.
 
-The named volumes are:
+Runtime state lives in the working directory:
 
-- `registry-storage`: Verdaccio package and tag data;
-- `shared`: the generated local-lab token (read-only to runtime services);
-- `victim-state` and `attacker-state`: deduplication and CLI history;
-- `victim-workspace`: the only filesystem tree exposed to path tasks;
-- `attacker-downloads`: received files.
+- `victim-state.json` / `attacker-state.json`: deduplication and CLI history;
+- `downloads/`: files received by the attacker;
+- `logs/lab.log`: optional append-only log when enabled in config.
 
 ## State, backup, and restore
 
 State files are required for at-most-once processing and monotonically
-allocated task sequences. Back up the registry and both state volumes as one
-consistent set while services are stopped. Restoring only one component can
-cause old tags to be baselined, results to be reported again, or sequence
-history to diverge.
+allocated task sequences. Back up the verdaccio storage directory and both
+state files as one consistent set while processes are stopped. Restoring only
+one component can cause old tags to be baselined, results to be reported
+again, or sequence history to diverge.
 
-For a disposable reset:
-
-```sh
-docker compose -f docker/docker-compose.yml down -v
-```
-
-This permanently removes registry data, state, the local token, workspace
-content, and downloads stored in the Compose volumes.
+For a disposable reset, stop the victim, attacker, and verdaccio, then delete
+the state files, `.lab-token`, and the verdaccio storage directory, and re-run
+`sh scripts/setup-registry.sh`. This permanently removes registry data, state,
+the local token, and downloaded files.
 
 ## Monitoring and failure handling
 
@@ -75,13 +70,13 @@ transient failures with exponential backoff. Configure `requestTimeoutMs`,
 ## Upgrade and rollback
 
 1. Stop the attacker and victim.
-2. Back up registry and state volumes together.
-3. Review image digest, protocol, configuration, and state-schema changes.
-4. Run CI checks and the Docker smoke test against the candidate revision.
-5. Start the registry/setup/victim, then the attacker, and verify one `ping`.
+2. Back up the registry storage and both state files together.
+3. Review protocol, configuration, and state-schema changes.
+4. Run CI checks against the candidate revision.
+5. Start the registry and victim, then the attacker, and verify one `ping`.
 
-Rollback uses the prior revision and the matching pre-upgrade volume backup.
-Do not mix restored state with a newer registry snapshot.
+Rollback uses the prior revision and the matching pre-upgrade backup. Do not
+mix restored state with a newer registry snapshot.
 
 ## Release checklist
 
@@ -89,7 +84,5 @@ Do not mix restored state with a newer registry snapshot.
 - `npm run lint`
 - `npm run test:coverage` (80% minimum for lines, branches, and functions)
 - `npm audit --omit=dev --audit-level=high`
-- `docker compose -f docker/docker-compose.yml config --quiet`
-- `npm run test:e2e`
 - Review `git diff --check` and the complete diff for secrets and unsafe opt-ins
 - Update README, protocol/architecture docs, and this runbook when behavior changes

@@ -93,9 +93,10 @@ uses one broadcast tag shared by every polling victim.
   payloads here are deliberately only base64 (readable) — a real implant
   would encrypt, but the metadata pattern remains visible regardless.
 - **Shared write token**: attacker and victim both need write access to the
-  same package. In this lab, `setup-registry.sh` shares one token between
-  containers for convenience — documented as such. A real scenario implies
-  an already-leaked maintainer token, which is itself a detectable event.
+  same package. In this lab, `scripts/setup-registry.sh` issues one token and
+  shares it with both sides for convenience — documented as such. A real
+  scenario implies an already-leaked maintainer token, which is itself a
+  detectable event.
 - **Rate limits / abuse controls**: npm rate-limits and monitors metadata
   writes; high-frequency tag churn on a single package is anomalous.
 - **Persistent artifacts**: npmjs.org requires interactive 2FA for sensitive
@@ -122,10 +123,10 @@ uses one broadcast tag shared by every polling victim.
 
 ## Operational security boundaries
 
-The supported Docker lab runs application services as a non-root user with a
-read-only root filesystem, no Linux capabilities, an internal network, and
-separate writable state/workspace volumes. Runtime configuration fails closed
-for public npm use and for sending a token over non-loopback plaintext HTTP.
+The supported local lab runs the victim and attacker as ordinary local
+processes against a loopback-only registry, with runtime configuration that
+fails closed for public npm use and for sending a token over non-loopback
+plaintext HTTP.
 
 Path tasks resolve both the configured root and requested target before
 enforcing containment, preventing lexical `..` and symlink escapes.

@@ -17,7 +17,7 @@ inspired by the npm-c2 research. Built for understanding C2 channel design and
 > operations and environment-value disclosure are disabled by default.
 > Payloads are deliberately plain base64 so
 > every artifact is readable and analyzable. The default registry is a
-> **local** verdaccio container.
+> **local** verdaccio instance.
 > Do not point this at packages or accounts you do not own.
 
 ## Architecture
@@ -55,24 +55,33 @@ Deep dives:
 ## Requirements
 
 - Node.js 22 or 24 LTS (zero runtime npm dependencies — standard library only)
-- Docker + Docker Compose (for the local registry environment)
+- Any npm-compatible registry; a local [verdaccio](https://verdaccio.org/)
+  instance is the recommended lab default
 
-## Quickstart (Docker — recommended)
+## Quickstart
 
 Everything runs locally against a throwaway verdaccio registry:
 
 ```sh
-# 1. Start the registry, seed it (creates user, publishes my-package@1.0.0),
-#    and start the victim agent
-docker compose -f docker/docker-compose.yml up -d registry setup victim
+# 1. Start a local registry on :4873
+npx verdaccio &
 
-# 2. Open the interactive attacker CLI
-docker compose -f docker/docker-compose.yml run --rm attacker
+# 2. Seed it (creates user, publishes my-package@1.0.0, writes token to ./.lab-token)
+sh scripts/setup-registry.sh
+
+# 3. Start the victim agent and the interactive attacker CLI
+npm run victim      # terminal 1
+npm run attacker    # terminal 2
 ```
 
-The registry port is bound to loopback only. Setup generates a random lab
-password when `LAB_PASS` is not supplied. Path operations are confined to the
-`victim-workspace` volume; place exercise files there before using them.
+Both sides read the token from `env.sh` or the `NPM_C2_TOKEN` environment
+variable; the easiest path is to put it in `env.sh` (see Configuration below):
+
+```sh
+cp env.sh.example env.sh
+chmod 600 env.sh
+printf 'export NPM_C2_TOKEN="%s"\n' "$(cat .lab-token)" >> env.sh
+```
 
 In the CLI:
 
@@ -80,8 +89,8 @@ In the CLI:
 kc2> task all ping              # one broadcast tag for all polling agents
 kc2> task all whoami            # report mock identity details
 kc2> task all pwd               # where is the agent?
-kc2> task all ls .              # list the isolated victim workspace
-kc2> task all getfile sample.txt  # fetch a file from that workspace
+kc2> task all ls .              # list the agent's current directory
+kc2> task all getfile sample.txt  # fetch a file from the victim's filesystem root
 kc2> agents                     # list historically discovered agents
 kc2> history 10                 # last 10 requests/responses
 kc2> stats                      # local counters
@@ -92,25 +101,9 @@ kc2> exit
 The CLI polls in the background while you type: agent discoveries and task
 completions/failures print as live notifications — no `watch` needed.
 
-Tear down:
-
-```sh
-docker compose -f docker/docker-compose.yml down -v
-```
-
-## Quickstart (local processes, no Docker)
-
-You need any npm-compatible registry. Easiest is still verdaccio:
-
-```sh
-npx verdaccio &                                    # local registry on :4873
-sh docker/setup-registry.sh                        # seeds user + package, writes token to /shared/token
-export NPM_C2_TOKEN="$(cat /shared/token)"         # or wherever SHARED_DIR pointed
-
-cp config.example.json config.json                 # adjust if needed
-npm run victim                                     # terminal 1: start agent
-npm run attacker                                   # terminal 2: start CLI
-```
+To reset the lab: stop the victim/attacker/verdaccio processes, delete the
+state files, `.lab-token`, and the verdaccio storage directory, then re-run
+steps 1–2 above.
 
 ## Using the real npmjs.org registry (optional, with warnings)
 
@@ -251,11 +244,10 @@ npm ci                  # reproducible install
 npm run lint            # syntax-check every JavaScript file
 npm test                # unit and integration tests
 npm run test:coverage   # enforce >=80% lines, branches, and functions
-npm run test:e2e        # Docker announce -> task -> result -> cleanup
 npm run check           # lint + coverage gate
 ```
 
-GitHub Actions tests Node.js 22 and 24 plus the Docker smoke flow. See
+GitHub Actions tests Node.js 22 and 24. See
 [`docs/operations.md`](docs/operations.md) for deployment, monitoring,
 incidents, upgrades, and releases, and [`SECURITY.md`](SECURITY.md) for the
 security boundaries and reporting policy.
@@ -266,8 +258,8 @@ Project layout:
 src/common/    protocol.js (codec) · ops.js (task allowlist metadata) · registry.js (HTTP client) · config.js · logger.js
 src/victim/    agent.js (poll loop) · tasks.js (core handlers) · fun.js (desktop handlers)
 src/attacker/  cli.js (REPL)
+scripts/       setup-registry.sh (seed a local registry) · check-source.mjs (lint)
 tests/         node:test unit tests
-docker/        Dockerfile · docker-compose.yml · setup-registry.sh · entrypoint.sh
 docs/          protocol.md · architecture.md · detection.md
 ```
 
