@@ -166,7 +166,7 @@ The table lists built-in defaults. `config.example.json` intentionally enables
 | `screenshotMaxWidth` / `NPM_C2_SCREENSHOT_MAX_WIDTH` | starting width (px) of the screenshot JPEG downscale ladder, 160–7680 | `1280` |
 | `uploadUrl` / `NPM_C2_UPLOAD_URL` | anonymous no-key file-share endpoint (`0x0.st`/`transfer.sh` style); screenshots upload full-res and return just a URL. Empty = channel transfer | `""` |
 | `enableGeolocate` / `NPM_C2_ENABLE_GEOLOCATE` | enable the `geolocate` task (WiFi positioning demo; discloses host location) | `false` |
-| `geolocateServiceUrl` / `NPM_C2_GEOLOCATE_URL` | MLS/Google-compatible WPS endpoint for coordinate lookup; empty = WiFi-scan-only mode | `""` |
+| `geolocateServiceUrl` / `NPM_C2_GEOLOCATE_URL` | MLS/Ichnaea-compatible WPS endpoint (recommended: beaconDB, no key — see table below); empty = WiFi-scan-only mode | `""` |
 | `geolocateServiceKey` / `NPM_C2_GEOLOCATE_KEY` | API key appended as `?key=` to the WPS endpoint | `""` |
 | `allowPublicRegistry` / `NPM_C2_ALLOW_PUBLIC_REGISTRY` | opt in to `registry.npmjs.org` | `false` |
 | `allowInsecureHttp` / `NPM_C2_ALLOW_INSECURE_HTTP` | permit token use over non-loopback HTTP | `false` |
@@ -232,7 +232,22 @@ built-in tools (`airport`/`system_profiler` on macOS, `nmcli` on Linux,
 resolves them against a WiFi Positioning System (WPS) database for
 coordinates with an accuracy estimate. This is how real-world implants
 locate hosts that have no GPS: BSSIDs are worldwide index keys in
-wardriving-derived databases (Google, Mozilla, Apple, WiGLE). Without a
+wardriving-derived databases. Any MLS/Ichnaea-compatible endpoint works —
+the request shape is the shared Google/Mozilla `wifiAccessPoints` JSON, the
+client identifies itself with a real User-Agent (required by beaconDB), and
+the response's `fallback` field is surfaced so students can contrast a true
+WiFi fix (tens of meters) with a coarse IP estimate (tens of kilometers):
+
+| Service | Endpoint | Key | Status (2026) |
+|---|---|---|---|
+| **beaconDB** (recommended) | `https://api.beacondb.net/v1/geolocate` | none | **works** — community MLS successor; experimental, sparse coverage outside mapped areas, falls back to IP estimate |
+| Google Geolocation API | `https://www.googleapis.com/geolocation/v1/geolocate` | required (`geolocateServiceKey`) | works — best coverage, billed |
+| Mozilla Location Service | `location.services.mozilla.com` | — | **retired 2024** — historical reference only |
+| Apple | — | — | no public API (private endpoint, used by macOS/iOS) |
+| WiGLE | `wigle.net` API | free account | different per-BSSID API — good manual-lookup exercise, not MLS-compatible |
+
+Note that IP-geolocation services like `ip-api.com` use a different
+response shape and are not compatible with the WPS client. Without a
 service URL the task returns the scan-only reconnaissance stage, which is
 itself the teachable artifact. It requires `enableGeolocate=true` on the
 victim. The allowlist is

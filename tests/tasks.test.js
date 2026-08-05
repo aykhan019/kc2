@@ -62,15 +62,15 @@ SSID 2 : Coffeeshop
 `;
 const WPS_RESPONSE = JSON.stringify({ location: { lat: 37.422, lng: -122.084 }, accuracy: 22 });
 
-function fakeGeoRuntime(platform, { failScan = false, failLookup = false, extra = {} } = {}) {
+function fakeGeoRuntime(platform, { failScan = false, failLookup = false, extra = {}, lookupOut = WPS_RESPONSE } = {}) {
   const calls = [];
   return {
     platform,
     enableGeolocate: true,
     calls,
     ...extra,
-    execFileSync(file) {
-      calls.push(file);
+    execFileSync(file, args) {
+      calls.push({ file, args });
       const missing = () => Object.assign(new Error(`${file} unavailable`), { code: 'ENOENT' });
       if (platform === 'darwin' && file.includes('airport')) {
         if (failScan) throw missing();
@@ -87,7 +87,7 @@ function fakeGeoRuntime(platform, { failScan = false, failLookup = false, extra 
       }
       if (file === 'curl') {
         if (failLookup) throw new Error('curl: (7) connection refused');
-        return WPS_RESPONSE;
+        return lookupOut;
       }
       throw new Error(`unexpected tool: ${file}`);
     },
@@ -126,7 +126,26 @@ test('geolocate resolves coordinates with accuracy via the WPS service', () => {
   assert.match(r.output, /wifi-scan \+ WPS database lookup/);
   assert.match(r.output, /lat=37\.422 lng=-122\.084 accuracyM=22/);
   assert.match(r.output, /service: wps\.example\.test/);
-  assert.ok(runtime.calls.includes('curl'));
+  const curl = runtime.calls.find((c) => c.file === 'curl');
+  assert.ok(curl, 'curl was invoked');
+  // beaconDB and friends require a client-identifying User-Agent
+  assert.match(curl.args.join(' '), /User-Agent: kc2-lab\//);
+  assert.match(curl.args.join(' '), /\?key=lab-key/);
+});
+
+test('geolocate surfaces the service fallback marker (coarse IP estimate)', () => {
+  const runtime = fakeGeoRuntime('linux', {
+    lookupOut: JSON.stringify({
+      location: { lat: 40.71, lng: -74.0 },
+      accuracy: 25000,
+      fallback: 'ipf',
+    }),
+    extra: { geolocateServiceUrl: 'https://api.beacondb.net/v1/geolocate' },
+  });
+  const r = runTask('geolocate', {}, runtime);
+  assert.equal(r.ok, true, r.error ?? '');
+  assert.match(r.output, /lat=40\.71 lng=-74 accuracyM=25000/);
+  assert.match(r.output, /fallback: ipf \(coarse estimate/);
 });
 
 test('geolocate reports scan and lookup failures clearly', () => {

