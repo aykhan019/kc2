@@ -242,7 +242,7 @@ async function main() {
     logFile: cfg.logFile,
     console: false, // keep REPL output clean; log lines go to the file only
   });
-  const statePath = cfg.stateFile || 'attacker-state.json';
+  const statePath = path.resolve(cfg.stateFile || 'attacker-state.json');
   const state = loadAttackerState(statePath);
   const save = () => saveState(statePath, state);
   const ttlMs = taskTtlMs(cfg.pollIntervalSec);

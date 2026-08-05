@@ -446,6 +446,24 @@ test('state file round-trip, private mode, and fail-closed corruption handling',
   assert.deepEqual(loadState(path.join(dir, 'missing.json')), defaultState());
 });
 
+test('state saving is immune to the cd task: pinned absolute path survives cwd changes', () => {
+  const dir = tmpdir();
+  const p = path.resolve(dir, 'victim-state.json'); // pinned at startup, like main() does
+  const original = process.cwd();
+  const s = defaultState();
+  s.agentId = AGENT;
+  saveState(p, s);
+  try {
+    process.chdir('/'); // simulate: task <agent> cd /
+    s.lastSeq[AGENT] = 9;
+    saveState(p, s); // must still write the original file, not /victim-state.json
+  } finally {
+    process.chdir(original);
+  }
+  assert.equal(loadState(p).lastSeq[AGENT], 9);
+  assert.equal(fs.existsSync('/victim-state.json'), false);
+});
+
 test('pending direct tasks are derived from local request/response history', () => {
   const history = [
     { dir: 'out', target: 'agent1', seq: 3, op: 'pwd', ts: 1000 },

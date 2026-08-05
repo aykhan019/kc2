@@ -251,7 +251,10 @@ async function main() {
     level: cfg.logLevel,
     logFile: cfg.logFile,
   });
-  const statePath = cfg.stateFile || 'victim-state.json';
+  // Pin the state path to an absolute location at startup: the `cd` task
+  // changes the agent's cwd, and a relative state path would silently move
+  // with it (and fail with EACCES in unwritable directories like /).
+  const statePath = path.resolve(cfg.stateFile || 'victim-state.json');
   let state = loadState(statePath);
   const save = () => saveState(statePath, state);
 
