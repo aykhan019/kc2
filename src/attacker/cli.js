@@ -141,6 +141,11 @@ function parseTaskLine(line) {
     case 'none':
       if (rest.length > 0) throw new Error(`op "${op}" takes no arguments`);
       break;
+    case 'cmd':
+      args.cmd = rest[0];
+      if (!args.cmd) throw new Error(`usage: task <target> ${def.usage}`);
+      args.args = rest.slice(1);
+      break;
     case 'text':
       args.text = rest.join(' ');
       break;

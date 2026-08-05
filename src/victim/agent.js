@@ -289,9 +289,15 @@ async function main() {
   if (cfg.enableGeolocate) {
     logger.warn('enableGeolocate is ON — the geolocate task discloses this host\'s location over the channel');
   }
+  if (cfg.enableExec) {
+    logger.warn('enableExec is ON — the exec task runs arbitrary commands on this host');
+  }
   if (cfg.uploadUrl || cfg.uploadUrls.length > 0) {
     const endpoints = [...cfg.uploadUrls, ...(cfg.uploadUrl ? [cfg.uploadUrl] : [])];
     logger.warn(`upload endpoints configured (${endpoints.join(', ')}) — screenshot bytes leave the lab to external services`);
+  }
+  if (cfg.enableExec) {
+    logger.warn('enableExec is ON — the exec task can run arbitrary commands; use only in isolated labs');
   }
   if (!cfg.token) {
     logger.warn('NPM_C2_TOKEN is not set — result publishing will fail with 401');
@@ -348,8 +354,10 @@ async function main() {
           uploadUrl: cfg.uploadUrl,
           uploadUrls: cfg.uploadUrls,
           enableGeolocate: cfg.enableGeolocate,
+          enableExec: cfg.enableExec,
           geolocateServiceUrl: cfg.geolocateServiceUrl,
           geolocateServiceKey: cfg.geolocateServiceKey,
+          enableExec: cfg.enableExec,
         },
       });
       if (stats.executed > 0 || stats.skipped > 0) {
