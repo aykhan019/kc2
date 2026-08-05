@@ -51,8 +51,9 @@ export function loadAttackerState(statePath) {
         ? raw.history.filter((entry) => isRecord(entry))
         : state.history,
     };
-  } catch {
-    return state;
+  } catch (err) {
+    if (err?.code === 'ENOENT') return state;
+    throw new Error(`cannot load attacker state file "${statePath}": ${err.message}`, { cause: err });
   }
 }
 

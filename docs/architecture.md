@@ -120,6 +120,20 @@ uses one broadcast tag shared by every polling victim.
   the heartbeat-to-stable-discovery migration.
 - `SIGINT`/`SIGTERM` flush state and exit cleanly.
 
+## Operational security boundaries
+
+The supported Docker lab runs application services as a non-root user with a
+read-only root filesystem, no Linux capabilities, an internal network, and
+separate writable state/workspace volumes. Runtime configuration fails closed
+for public npm use and for sending a token over non-loopback plaintext HTTP.
+
+Path tasks resolve both the configured root and requested target before
+enforcing containment, preventing lexical `..` and symlink escapes.
+Environment values and desktop-affecting operations require separate explicit
+opt-ins. These controls reduce accidental exposure; they do not make the
+design a secure or covert production control plane. See
+[`operations.md`](operations.md) and [`../SECURITY.md`](../SECURITY.md).
+
 ## Threat model for the lab
 
 In scope: demonstrating the metadata channel end-to-end, with mock tasks, so

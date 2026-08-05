@@ -42,6 +42,34 @@ test('unknown op is rejected, never executed', () => {
   assert.equal(r2.ok, false);
 });
 
+test('fun ops are disabled when the runtime does not explicitly enable them', () => {
+  const result = runTask('beep', {}, { enableFunOps: false });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /disabled/);
+});
+
+test('filesystem root blocks lexical and symlink escapes', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-root-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-outside-'));
+  fs.writeFileSync(path.join(root, 'inside.txt'), 'inside');
+  fs.writeFileSync(path.join(outside, 'secret.txt'), 'outside');
+  if (process.platform !== 'win32') {
+    fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'escape.txt'));
+  }
+
+  assert.equal(runTask('hash', { path: path.join(root, 'inside.txt') }, { filesystemRoot: root }).ok, true);
+  for (const candidate of [path.join(root, '..', path.basename(outside), 'secret.txt'), path.join(outside, 'secret.txt')]) {
+    const result = runTask('getfile', { path: candidate }, { filesystemRoot: root });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /filesystem root/);
+  }
+  if (process.platform !== 'win32') {
+    const result = runTask('getfile', { path: path.join(root, 'escape.txt') }, { filesystemRoot: root });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /filesystem root/);
+  }
+});
+
 test('whoami returns identity info', () => {
   const r = runTask('whoami', {});
   assert.equal(r.ok, true);

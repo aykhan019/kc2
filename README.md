@@ -11,8 +11,10 @@ inspired by the npm-c2 research. Built for understanding C2 channel design and
 > `stat`, `find`, `hash`, `getfile`, plus eight visible/audible `fun` ops).
 > There is **no** arbitrary command
 > execution, persistence, privilege escalation, obfuscation, or encryption.
-> `getfile` reads a single file (absolute path, or relative to the agent's
-> cwd) under a small size cap. Payloads are deliberately plain base64 so
+> Path operations are confined to a configured filesystem root, and
+> `getfile` reads one file under a small size cap. Desktop-affecting
+> operations and environment-value disclosure are disabled by default.
+> Payloads are deliberately plain base64 so
 > every artifact is readable and analyzable. The default registry is a
 > **local** verdaccio container.
 > Do not point this at packages or accounts you do not own.
@@ -51,7 +53,7 @@ Deep dives:
 
 ## Requirements
 
-- Node.js ≥ 20 (zero runtime npm dependencies — standard library only)
+- Node.js 22 or 24 LTS (zero runtime npm dependencies — standard library only)
 - Docker + Docker Compose (for the local registry environment)
 
 ## Quickstart (Docker — recommended)
@@ -68,7 +70,8 @@ docker compose -f docker/docker-compose.yml run --rm attacker
 ```
 
 The registry port is bound to loopback only. Setup generates a random lab
-password when `LAB_PASS` is not supplied.
+password when `LAB_PASS` is not supplied. Path operations are confined to the
+`victim-workspace` volume; place exercise files there before using them.
 
 In the CLI:
 
@@ -76,8 +79,8 @@ In the CLI:
 npm-c2> task all ping              # one broadcast tag for all polling agents
 npm-c2> task all whoami            # report mock identity details
 npm-c2> task all pwd               # where is the agent?
-npm-c2> task all ls /tmp           # list a directory on the victim
-npm-c2> task all getfile /etc/hosts  # fetch a file (absolute or cwd-relative)
+npm-c2> task all ls .              # list the isolated victim workspace
+npm-c2> task all getfile sample.txt  # fetch a file from that workspace
 npm-c2> agents                     # list historically discovered agents
 npm-c2> history 10                 # last 10 requests/responses
 npm-c2> stats                      # local counters
@@ -125,6 +128,9 @@ research. If you do this:
 Set `registryUrl: "https://registry.npmjs.org"` and your `packageName` in
 `config.json` — or better, put everything including the token in `env.sh`
 (see below), which keeps secrets out of config files entirely.
+You must also set `NPM_C2_ALLOW_PUBLIC_REGISTRY=true`; startup otherwise fails
+closed. A token over non-loopback HTTP likewise requires the separate
+`NPM_C2_ALLOW_INSECURE_HTTP=true` isolated-lab opt-in.
 
 ## Configuration
 
@@ -146,20 +152,31 @@ Real environment variables always win over `env.sh` values. Use
 `NPM_C2_ENV_FILE=/path/to/file` to load a different file. On POSIX systems,
 group- or world-readable env files are refused.
 
+The table lists built-in defaults. `config.example.json` intentionally enables
+`logs/lab.log` for local process runs; set `NPM_C2_LOG_FILE=` to disable it.
+
 | Key / env var | Meaning | Default |
 |---|---|---|
 | `registryUrl` / `NPM_C2_REGISTRY_URL` | registry base URL | `http://localhost:4873` |
 | `packageName` / `NPM_C2_PACKAGE_NAME` | mailbox package | `my-package` |
 | `pollIntervalSec` / `NPM_C2_POLL_INTERVAL` | victim poll interval | `10` |
 | `agentId` / `NPM_C2_AGENT_ID` | victim id (generated + persisted if empty) | `""` |
-| `logFile` / `NPM_C2_LOG_FILE` | append-only log file (`""` disables) | `logs/lab.log` |
+| `logFile` / `NPM_C2_LOG_FILE` | append-only log file (`""` disables) | `""` |
 | `stateFile` / `NPM_C2_STATE_FILE` | state file path (role default if empty) | `""` |
-| `maxFileBytes` / `NPM_C2_MAX_FILE_BYTES` | max bytes returned by `getfile` | `32768` |
+| `maxFileBytes` / `NPM_C2_MAX_FILE_BYTES` | max bytes returned by `getfile` (hard cap 1 MiB) | `32768` |
 | `revealEnv` / `NPM_C2_REVEAL_ENV` | let `env` return real values instead of `<redacted>` (`true`/`1`/`yes`) | `false` |
+| `filesystemRoot` / `NPM_C2_FILESYSTEM_ROOT` | realpath boundary for path operations | `.` |
+| `downloadDir` / `NPM_C2_DOWNLOAD_DIR` | attacker destination for received files | `downloads` |
+| `enableFunOps` / `NPM_C2_ENABLE_FUN_OPS` | enable attended-host desktop actions | `false` |
+| `allowPublicRegistry` / `NPM_C2_ALLOW_PUBLIC_REGISTRY` | opt in to `registry.npmjs.org` | `false` |
+| `allowInsecureHttp` / `NPM_C2_ALLOW_INSECURE_HTTP` | permit token use over non-loopback HTTP | `false` |
+| `logLevel` / `NPM_C2_LOG_LEVEL` | `debug`/`info`/`warn`/`error` | `info` |
+| `requestTimeoutMs` / `NPM_C2_REQUEST_TIMEOUT_MS` | per-request timeout, 100–120000 ms | `10000` |
+| `maxRetries` / `NPM_C2_MAX_RETRIES` | retries after the first attempt, 0–10 | `3` |
+| `retryBaseDelayMs` / `NPM_C2_RETRY_BASE_DELAY_MS` | exponential-backoff base, 10–60000 ms | `500` |
 | — / `NPM_C2_TOKEN` | registry bearer token (**env / `env.sh` only, never `config.json`**) | — |
 | — / `NPM_C2_ENV_FILE` | explicit env.sh path | `./env.sh` |
 | — / `NPM_C2_CONFIG` | explicit config file path | `./config.json` |
-| — / `NPM_C2_LOG_LEVEL` | `debug`/`info`/`warn`/`error` | `info` |
 
 State files: `victim-state.json` (agent id, command-baseline version, and last
 processed seq per target), `attacker-state.json` (last issued seq per target,
@@ -182,14 +199,16 @@ Ops without arguments: `echo <text>`, `ping`, `time`, `sysinfo`, `whoami`,
 `env` (names listed, all values redacted unless the victim opts in with
 `revealEnv`), `netinfo`, `ps`, `df`, `pwd`. Ops
 taking a path: `cd`, `stat`, `hash`, `getfile` — the path is **absolute, or
-relative to the agent's current working directory** (use `pwd` to see it and
-`cd` to change it). `ls [path]` lists a directory (default: the agent's cwd)
+relative to the agent's current working directory**, but its real target must
+remain under `filesystemRoot` (use `pwd` to see the cwd and `cd` to change it).
+`ls [path]` lists a directory (default: the agent's cwd)
 and `find <dir> <text>` searches file names recursively. The allowlist is
 data-driven: `src/common/ops.js` holds each op's name, usage, argument spec,
 and help summary — adding an op is one entry there plus one handler under
 `src/victim/`.
 
-Fun ops are shown in their own CLI help section: `openurl <http(s)-url>`,
+Fun ops are shown in their own CLI help section but require
+`enableFunOps=true` on the victim: `openurl <http(s)-url>`,
 `say <text>`, `notify <text>`, `beep`, `bounce`, `volume <0-100>`, `rickroll`,
 and `party`. They use built-in macOS/Windows facilities and common Linux
 desktop utilities. Minimal/headless Linux systems report a clear error when
@@ -227,8 +246,18 @@ same way as text files. The attacker saves reassembled downloads under
 ## Development
 
 ```sh
-npm test          # node:test unit suite (protocol, registry client, agent)
+npm ci                  # reproducible install
+npm run lint            # syntax-check every JavaScript file
+npm test                # unit and integration tests
+npm run test:coverage   # enforce >=80% lines, branches, and functions
+npm run test:e2e        # Docker announce -> task -> result -> cleanup
+npm run check           # lint + coverage gate
 ```
+
+GitHub Actions tests Node.js 22 and 24 plus the Docker smoke flow. See
+[`docs/operations.md`](docs/operations.md) for deployment, monitoring,
+incidents, upgrades, and releases, and [`SECURITY.md`](SECURITY.md) for the
+security boundaries and reporting policy.
 
 Project layout:
 
@@ -243,4 +272,4 @@ docs/          protocol.md · architecture.md · detection.md
 
 ## License
 
-MIT — for educational and defensive-security use only.
+[MIT](LICENSE) — for educational and defensive-security use only.

@@ -6,5 +6,14 @@
   "logFile": "logs/lab.log",
   "stateFile": "",
   "maxFileBytes": 32768,
-  "revealEnv": false
+  "revealEnv": false,
+  "filesystemRoot": ".",
+  "downloadDir": "downloads",
+  "enableFunOps": false,
+  "allowPublicRegistry": false,
+  "allowInsecureHttp": false,
+  "logLevel": "info",
+  "requestTimeoutMs": 10000,
+  "maxRetries": 3,
+  "retryBaseDelayMs": 500
 }

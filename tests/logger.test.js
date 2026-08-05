@@ -27,13 +27,17 @@ test('logger sanitizes string metadata and serializes object metadata', () => {
   const logger = createLogger({ logFile, console: false });
 
   logger.info('string meta', 'line\nvalue');
-  logger.info('object meta', { ok: true });
+  logger.info('object meta', { ok: true, injected: 'line\n\u001b[31mvalue' });
   logger.close();
 
   const lines = fs.readFileSync(logFile, 'utf8').trimEnd().split('\n');
   assert.equal(lines.length, 2);
   assert.match(lines[0], /string meta line\\nvalue$/);
-  assert.match(lines[1], /object meta \{"ok":true\}$/);
+  assert.match(lines[1], /object meta \{"ok":true,"injected":"line\\\\nvalue"\}$/);
+  assert.doesNotMatch(lines[1], /\u001b/);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(logFile).mode & 0o777, 0o600);
+  }
 });
 
 test('logger honors levels and routes console severities', () => {

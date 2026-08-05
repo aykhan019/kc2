@@ -1,0 +1,34 @@
+# Isolated lab registry: never proxy unknown package names to the public npm
+# registry. This prevents dependency-confusion lookups and allows the internal
+# Docker network to stay disconnected from the internet.
+storage: /verdaccio/storage/data
+
+web:
+  enabled: false
+
+auth:
+  htpasswd:
+    file: /verdaccio/storage/htpasswd
+    max_users: 100
+
+packages:
+  '@*/*':
+    access: $all
+    publish: $authenticated
+    unpublish: $authenticated
+  '**':
+    access: $all
+    publish: $authenticated
+    unpublish: $authenticated
+
+server:
+  keepAliveTimeout: 60
+
+middlewares:
+  audit:
+    enabled: false
+
+log:
+  type: stdout
+  format: pretty
+  level: http

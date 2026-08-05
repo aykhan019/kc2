@@ -143,7 +143,19 @@ export class RegistryClient {
   /** @returns {Promise<Record<string, string>>} map of tag name -> version */
   async getDistTags() {
     const res = await this.#request('');
-    return res.json();
+    let data;
+    try {
+      data = await res.json();
+    } catch (err) {
+      throw new RegistryError('registry returned invalid JSON for dist-tags', { cause: err });
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new RegistryError('registry dist-tags response must be a JSON object');
+    }
+    if (Object.values(data).some((version) => typeof version !== 'string')) {
+      throw new RegistryError('registry dist-tags response must contain string versions');
+    }
+    return { ...data };
   }
 
   /**

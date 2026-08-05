@@ -6,12 +6,16 @@
   "private": true,
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "victim": "node src/victim/agent.js",
     "attacker": "node src/attacker/cli.js",
-    "test": "node --test"
+    "lint": "node scripts/check-source.mjs",
+    "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include=src/**/*.js --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-functions=80",
+    "test:e2e": "sh scripts/smoke-test.sh",
+    "check": "npm run lint && npm run test:coverage"
   },
   "keywords": [
     "security-research",

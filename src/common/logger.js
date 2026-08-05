@@ -16,6 +16,17 @@ function sanitize(value) {
   });
 }
 
+function serializeMeta(meta) {
+  if (typeof meta === 'string') return sanitize(meta);
+  try {
+    return JSON.stringify(meta, (_key, value) => (
+      typeof value === 'string' ? sanitize(value) : value
+    ));
+  } catch {
+    return '"<unserializable metadata>"';
+  }
+}
+
 /**
  * @param {object} opts
  * @param {string} [opts.level]   minimum level: debug|info|warn|error
@@ -28,8 +39,9 @@ export function createLogger({ level = 'info', logFile = '', tty = process.stdou
   let fd = null;
   if (logFile) {
     const abs = path.resolve(logFile);
-    fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fd = fs.openSync(abs, 'a');
+    fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
+    fd = fs.openSync(abs, 'a', 0o600);
+    if (process.platform !== 'win32') fs.fchmodSync(fd, 0o600);
   }
 
   function write(lvl, msg, meta) {
@@ -37,7 +49,7 @@ export function createLogger({ level = 'info', logFile = '', tty = process.stdou
     const ts = new Date().toISOString();
     let line = `[${ts}] [${lvl.toUpperCase().padEnd(5)}] ${sanitize(msg)}`;
     if (meta !== undefined) {
-      line += ' ' + (typeof meta === 'string' ? sanitize(meta) : JSON.stringify(meta));
+      line += ' ' + serializeMeta(meta);
     }
     if (toConsole) {
       const out = tty ? styleText(COLORS[lvl], line) : line;

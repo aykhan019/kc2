@@ -1,8 +1,7 @@
 // MOCK task implementations. This is a hard-coded allowlist on purpose:
 // the victim agent can NEVER execute arbitrary shell commands — only these
 // deterministic, read-mostly operations. `getfile` is the most capable one:
-// it reads one file (absolute path, or relative to the agent's current
-// working directory — see the `cd`/`pwd` ops), size-capped, so the lab can
+// it reads one file inside the configured filesystem root, size-capped, so the lab can
 // demonstrate binary transfer over the channel. Everything still travels as
 // plain base64.
 import fs from 'node:fs';
@@ -11,6 +10,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { TASK_OPS } from '../common/protocol.js';
+import { getOpDef } from '../common/ops.js';
 import { runFunTask } from './fun.js';
 
 export const DEFAULT_MAX_FILE_BYTES = 32 * 1024;
@@ -52,14 +52,22 @@ function safeValue(fn, fallback = '?') {
 }
 
 /**
- * Resolve a task path: absolute paths are used as-is; relative paths resolve
- * against the agent's current working directory (changed by the `cd` op).
+ * Resolve a task path against the agent cwd and enforce the optional realpath
+ * root boundary, including for symlink targets.
  */
-function resolvePath(requestedPath) {
+function resolvePath(requestedPath, limits = {}) {
   const p = typeof requestedPath === 'string' ? requestedPath.trim() : '';
   if (!p) throw new Error('a path argument is required');
   if (p.includes('\0')) throw new Error('path contains NUL byte');
-  return path.resolve(process.cwd(), p);
+  const resolved = fs.realpathSync(path.resolve(process.cwd(), p));
+  if (limits.filesystemRoot) {
+    const root = fs.realpathSync(path.resolve(limits.filesystemRoot));
+    const relative = path.relative(root, resolved);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error(`path escapes configured filesystem root: ${root}`);
+    }
+  }
+  return resolved;
 }
 
 function describeEntry(dir, name) {
@@ -182,8 +190,8 @@ const TASKS = {
   },
 
   /** Change the agent's working directory; later relative paths follow it. */
-  cd(args = {}) {
-    const dir = resolvePath(args.path);
+  cd(args = {}, limits = {}) {
+    const dir = resolvePath(args.path, limits);
     const st = fs.statSync(dir);
     if (!st.isDirectory()) throw new Error(`not a directory: ${dir}`);
     process.chdir(dir);
@@ -191,8 +199,8 @@ const TASKS = {
   },
 
   /** List a directory (default: cwd). Output is one "type size name" per line. */
-  ls(args = {}) {
-    const dir = resolvePath(args.path || '.');
+  ls(args = {}, limits = {}) {
+    const dir = resolvePath(args.path || '.', limits);
     const st = fs.statSync(dir);
     if (!st.isDirectory()) throw new Error(`not a directory: ${dir}`);
     const names = fs.readdirSync(dir).sort();
@@ -211,8 +219,8 @@ const TASKS = {
   },
 
   /** File metadata: type, size, timestamps, permissions. */
-  stat(args = {}) {
-    const p = resolvePath(args.path);
+  stat(args = {}, limits = {}) {
+    const p = resolvePath(args.path, limits);
     const st = fs.statSync(p);
     const type = st.isDirectory() ? 'dir' : st.isFile() ? 'file' : 'other';
     return [
@@ -226,8 +234,8 @@ const TASKS = {
   },
 
   /** SHA-256 of a file (read-only, capped at HASH_MAX_BYTES). */
-  hash(args = {}) {
-    const p = resolvePath(args.path);
+  hash(args = {}, limits = {}) {
+    const p = resolvePath(args.path, limits);
     const st = fs.statSync(p);
     if (!st.isFile()) throw new Error(`not a regular file: ${p}`);
     if (st.size > HASH_MAX_BYTES) {
@@ -238,8 +246,8 @@ const TASKS = {
   },
 
   /** Recursively find files under a directory whose name contains the query. */
-  find(args = {}) {
-    const root = resolvePath(args.path);
+  find(args = {}, limits = {}) {
+    const root = resolvePath(args.path, limits);
     const query = String(args.query ?? '').toLowerCase();
     if (!query) throw new Error('find requires a name query');
     const st = fs.statSync(root);
@@ -284,7 +292,7 @@ const TASKS = {
     const p = typeof args.path === 'string' ? args.path.trim() : '';
     if (!p) throw new Error('getfile requires args.path');
     const max = positiveLimit(limits.maxFileBytes, DEFAULT_MAX_FILE_BYTES);
-    const file = resolvePath(p);
+    const file = resolvePath(p, limits);
     const st = fs.statSync(file);
     if (!st.isFile()) throw new Error(`not a regular file: ${file}`);
     if (st.size > max) {
@@ -326,6 +334,9 @@ export function runTask(op, args = {}, limits = {}) {
       ok: false,
       error: `unknown or disallowed op "${op}" — allowlist: ${ALLOWED_OPS.join(', ')}`,
     };
+  }
+  if (getOpDef(op)?.group === 'fun' && limits.enableFunOps === false) {
+    return { ok: false, error: `task "${op}" is disabled; set enableFunOps only on an attended lab host` };
   }
   try {
     const r = fn(args, limits);

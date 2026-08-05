@@ -73,8 +73,10 @@ usage/argument metadata in `src/common/ops.js`: `echo`, `ping`, `time`,
 `find`, `hash`, `getfile`, `openurl`, `say`, `notify`, `beep`, `bounce`,
 `volume`, `rickroll`, `party`). Anything else is answered with `ok: false`.
 Path-taking ops accept an **absolute path, or a path relative to the agent's
-current working directory**; `cd` changes that cwd for subsequent tasks,
-`pwd` reports it. `getfile` enforces `maxFileBytes` (default 32 KiB) and
+current working directory**, but the real resolved target must remain inside
+the configured `filesystemRoot`; symlinks cannot escape it. `cd` changes the
+cwd for subsequent tasks and `pwd` reports it. `getfile` enforces
+`maxFileBytes` (default 32 KiB, hard cap 1 MiB) and
 returns the file as base64 in the result payload's optional `file` field
 (`{ name, size, dataB64 }`). `hash` returns the SHA-256 of a file (read-only,
 capped at 64 MiB); `ls` is truncated at 200 entries, `find` at 100 matches
@@ -82,6 +84,9 @@ and depth 6, `ps` at 40 rows; `ps`/`df` are unix-only; `env` lists names and
 redacts every value unless the victim operator opts in with the `revealEnv`
 config flag. The attacker CLI reassembles `getfile` results and
 saves them under `downloads/`.
+
+The eight visible/audible desktop operations are rejected unless the victim
+operator explicitly enables `enableFunOps` on an attended lab host.
 
 Result payload (JSON):
 
@@ -92,7 +97,7 @@ Result payload (JSON):
 `getfile` result payloads add a file object:
 
 ```json
-{ "seq": 8, "op": "getfile", "ok": true, "output": "/etc/hosts (1024 bytes)", "file": { "name": "hosts", "size": 1024, "dataB64": "..." }, "ts": 1720000002000 }
+{ "seq": 8, "op": "getfile", "ok": true, "output": "/workspace/sample.bin (1024 bytes)", "file": { "name": "sample.bin", "size": 1024, "dataB64": "..." }, "ts": 1720000002000 }
 ```
 
 ## Announce tags (stable agent discovery)

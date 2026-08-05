@@ -22,7 +22,7 @@ import {
   pendingDirectTasks,
   sanitizeRegistryText,
 } from '../src/attacker/cli.js';
-import { assertKnownAgent, loadAttackerState } from '../src/attacker/state.js';
+import { assertKnownAgent, defaultAttackerState, loadAttackerState } from '../src/attacker/state.js';
 
 const AGENT = 'a1b2c3d4';
 
@@ -429,7 +429,7 @@ test('commands published after the baseline execute normally', async () => {
   assert.equal(baseline.lastSeq[AGENT], 3);
 });
 
-test('state file round-trip and corruption resilience', () => {
+test('state file round-trip, private mode, and fail-closed corruption handling', () => {
   const dir = tmpdir();
   const p = path.join(dir, 'state.json');
   const s = defaultState();
@@ -437,9 +437,13 @@ test('state file round-trip and corruption resilience', () => {
   s.lastSeq[AGENT] = 5;
   s.commandBaselineVersion = 1;
   saveState(p, s);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(p).mode & 0o777, 0o600);
+  }
   assert.deepEqual(loadState(p), s);
   fs.writeFileSync(p, 'not json {');
-  assert.deepEqual(loadState(p), defaultState(), 'corrupt state file falls back to defaults');
+  assert.throws(() => loadState(p), /cannot load state/);
+  assert.deepEqual(loadState(path.join(dir, 'missing.json')), defaultState());
 });
 
 test('pending direct tasks are derived from local request/response history', () => {
@@ -478,6 +482,14 @@ test('legacy attacker state preserves durable data and drops heartbeat-only fiel
   assert.equal(loaded.history.length, 1);
   assert.equal('presenceVersion' in loaded, false);
   assert.equal('agentInfo' in loaded, false);
+});
+
+test('attacker state fails closed on corrupt JSON but permits a missing file', () => {
+  const dir = tmpdir();
+  const statePath = path.join(dir, 'attacker-state.json');
+  assert.deepEqual(loadAttackerState(statePath), defaultAttackerState());
+  fs.writeFileSync(statePath, '{ broken');
+  assert.throws(() => loadAttackerState(statePath), /cannot load attacker state/);
 });
 
 test('direct tasking requires a historically known agent', () => {

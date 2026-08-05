@@ -13,6 +13,16 @@ const TOUCHED = [
   'NPM_C2_PACKAGE_NAME',
   'NPM_C2_MAX_FILE_BYTES',
   'NPM_C2_REVEAL_ENV',
+  'NPM_C2_ENABLE_FUN_OPS',
+  'NPM_C2_ALLOW_PUBLIC_REGISTRY',
+  'NPM_C2_ALLOW_INSECURE_HTTP',
+  'NPM_C2_FILESYSTEM_ROOT',
+  'NPM_C2_DOWNLOAD_DIR',
+  'NPM_C2_LOG_LEVEL',
+  'NPM_C2_LOG_FILE',
+  'NPM_C2_REQUEST_TIMEOUT_MS',
+  'NPM_C2_MAX_RETRIES',
+  'NPM_C2_RETRY_BASE_DELAY_MS',
   'NPM_C2_TRANSFER_ROOT',
   'NPM_C2_ENV_FILE',
   'NPM_C2_TEST_PLAIN',
@@ -101,6 +111,7 @@ test('loadConfig picks up token and overrides via env.sh (NPM_C2_ENV_FILE)', () 
       'NPM_C2_REGISTRY_URL=https://registry.npmjs.org',
       'NPM_C2_PACKAGE_NAME=@someone/disttag-lab-test',
       'NPM_C2_MAX_FILE_BYTES=4096',
+      'NPM_C2_ALLOW_PUBLIC_REGISTRY=true',
     ].join('\n'),
   );
   process.env.NPM_C2_ENV_FILE = file;
@@ -109,7 +120,70 @@ test('loadConfig picks up token and overrides via env.sh (NPM_C2_ENV_FILE)', () 
   assert.equal(cfg.registryUrl, 'https://registry.npmjs.org');
   assert.equal(cfg.packageName, '@someone/disttag-lab-test');
   assert.equal(cfg.maxFileBytes, 4096);
-  delete process.env.NPM_C2_ENV_FILE;
+  assert.equal(cfg.allowPublicRegistry, true);
+  process.env.NPM_C2_ENV_FILE = '/nonexistent/npm-c2-test-env.sh';
+  delete process.env.NPM_C2_TOKEN;
+  delete process.env.NPM_C2_REGISTRY_URL;
+  delete process.env.NPM_C2_PACKAGE_NAME;
+  delete process.env.NPM_C2_MAX_FILE_BYTES;
+  delete process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY;
+});
+
+test('production safety settings are secure by default and paths resolve absolutely', () => {
+  const cfg = loadConfig('/nonexistent/config.json');
+  assert.equal(cfg.enableFunOps, false);
+  assert.equal(cfg.allowPublicRegistry, false);
+  assert.equal(cfg.allowInsecureHttp, false);
+  assert.equal(cfg.filesystemRoot, process.cwd());
+  assert.equal(cfg.downloadDir, path.resolve('downloads'));
+  assert.equal(cfg.logLevel, 'info');
+  assert.equal(cfg.requestTimeoutMs, 10_000);
+  assert.equal(cfg.maxRetries, 3);
+  assert.equal(cfg.retryBaseDelayMs, 500);
+});
+
+test('public npm and plaintext remote tokens require explicit opt-ins', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-configtest-'));
+  const config = path.join(dir, 'config.json');
+
+  fs.writeFileSync(config, JSON.stringify({ registryUrl: 'https://registry.npmjs.org' }));
+  assert.throws(() => loadConfig(config), /allowPublicRegistry/);
+
+  fs.writeFileSync(config, JSON.stringify({
+    registryUrl: 'http://registry.internal:4873',
+    allowPublicRegistry: true,
+  }));
+  process.env.NPM_C2_TOKEN = 'test-token';
+  assert.throws(() => loadConfig(config), /allowInsecureHttp/);
+
+  process.env.NPM_C2_ALLOW_INSECURE_HTTP = 'true';
+  assert.equal(loadConfig(config).allowInsecureHttp, true);
+  delete process.env.NPM_C2_ALLOW_INSECURE_HTTP;
+  delete process.env.NPM_C2_TOKEN;
+});
+
+test('configuration rejects placeholders, credentials in URLs, and invalid runtime limits', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-configtest-'));
+  const config = path.join(dir, 'config.json');
+
+  process.env.NPM_C2_TOKEN = 'npm_replace_me';
+  assert.throws(() => loadConfig(config), /placeholder/);
+  delete process.env.NPM_C2_TOKEN;
+
+  fs.writeFileSync(config, JSON.stringify({ registryUrl: 'https://user:pass@example.test' }));
+  assert.throws(() => loadConfig(config), /must not contain credentials/);
+
+  for (const [key, value, expected] of [
+    ['packageName', '../bad', /packageName/],
+    ['agentId', 'bad-agent', /agentId/],
+    ['logLevel', 'verbose', /logLevel/],
+    ['requestTimeoutMs', 0, /requestTimeoutMs/],
+    ['maxRetries', 11, /maxRetries/],
+    ['retryBaseDelayMs', 0, /retryBaseDelayMs/],
+  ]) {
+    fs.writeFileSync(config, JSON.stringify({ [key]: value }));
+    assert.throws(() => loadConfig(config), expected);
+  }
 });
 
 test('loadConfig rejects invalid file transfer settings', () => {
@@ -119,6 +193,15 @@ test('loadConfig rejects invalid file transfer settings', () => {
 
   fs.writeFileSync(config, JSON.stringify({ maxFileBytes: 0 }));
   assert.throws(() => loadConfig(config), /maxFileBytes must be a positive number/);
+});
+
+test('an empty log-file environment override disables configured file logging', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-configtest-'));
+  const config = path.join(dir, 'config.json');
+  fs.writeFileSync(config, JSON.stringify({ logFile: 'logs/lab.log' }));
+  process.env.NPM_C2_LOG_FILE = '';
+  assert.equal(loadConfig(config).logFile, '');
+  delete process.env.NPM_C2_LOG_FILE;
 });
 
 test('revealEnv defaults to false and parses from config file and env', () => {

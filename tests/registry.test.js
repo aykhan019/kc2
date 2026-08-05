@@ -51,6 +51,17 @@ test('getDistTags returns the tag map and sends no auth requirement on read', as
   assert.deepEqual(tags, { latest: '1.0.0', 'x-cmd-a-1-Zm9v': '1.0.0' });
 });
 
+test('getDistTags rejects malformed or structurally invalid registry data', async () => {
+  const invalidJson = await startMockRegistry((_req, res) => res.end('{broken'));
+  await assert.rejects(makeClient(invalidJson.url).getDistTags(), /invalid JSON/);
+
+  const arrayBody = await startMockRegistry((_req, res) => res.end('[]'));
+  await assert.rejects(makeClient(arrayBody.url).getDistTags(), /JSON object/);
+
+  const invalidValue = await startMockRegistry((_req, res) => res.end('{"latest":1}'));
+  await assert.rejects(makeClient(invalidValue.url).getDistTags(), /string versions/);
+});
+
 test('setDistTag issues PUT with bearer token and JSON-string body', async () => {
   let seen = null;
   const { url } = await startMockRegistry(async (req, res) => {

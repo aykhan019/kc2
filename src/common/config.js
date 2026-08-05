@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const DEFAULTS = {
+export const DEFAULTS = Object.freeze({
   registryUrl: 'http://localhost:4873',
   packageName: 'my-package',
   pollIntervalSec: 10,
@@ -17,8 +17,22 @@ export const DEFAULTS = {
   stateFile: '', // role-specific default is used when empty
   maxFileBytes: 32 * 1024, // cap for the getfile task (channel moves ~130B/tag)
   revealEnv: false, // opt-in: let the env task return real values (may expose secrets)
+  filesystemRoot: '.', // path-oriented tasks cannot escape this directory
+  downloadDir: 'downloads',
+  enableFunOps: false,
+  allowPublicRegistry: false,
+  allowInsecureHttp: false,
+  logLevel: 'info',
+  requestTimeoutMs: 10_000,
+  maxRetries: 3,
+  retryBaseDelayMs: 500,
   token: '', // only ever populated from the NPM_C2_TOKEN env var
-};
+});
+
+const LOG_LEVELS = new Set(['debug', 'info', 'warn', 'error']);
+const PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+const AGENT_ID_RE = /^[A-Za-z0-9_]{1,64}$/;
+const MAX_FILE_BYTES = 1024 * 1024;
 
 /** Accept true/1/"1"/"true"/"yes" (case-insensitive); everything else is false. */
 export function parseBoolFlag(value) {
@@ -37,8 +51,8 @@ const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * Load KEY=VALUE lines from an env.sh-style file into process.env.
  * Looks at $NPM_C2_ENV_FILE first, then ./env.sh. Missing file is fine.
  * Lines already present in the real environment are NOT overridden.
- * Supports: blank lines, # comments, optional `export ` prefix,
- * optional single/double quotes around values.
+ * Supports NPM_C2_* keys, blank lines, # comments, optional `export ` prefix,
+ * and optional single/double quotes around values.
  * @returns {string|null} path that was loaded, or null
  */
 export function loadEnvFile(envPath) {
@@ -60,7 +74,7 @@ export function loadEnvFile(envPath) {
     const eq = body.indexOf('=');
     if (eq < 1) continue;
     const key = body.slice(0, eq).trim();
-    if (!ENV_KEY_RE.test(key)) continue;
+    if (!ENV_KEY_RE.test(key) || !key.startsWith('NPM_C2_')) continue;
     let value = body.slice(eq + 1).trim();
     if (
       value.length >= 2 &&
@@ -112,7 +126,7 @@ export function loadConfig(explicitPath) {
     if (Number.isFinite(n) && n > 0) cfg.pollIntervalSec = n;
   }
   if (process.env.NPM_C2_AGENT_ID) cfg.agentId = process.env.NPM_C2_AGENT_ID;
-  if (process.env.NPM_C2_LOG_FILE !== undefined && process.env.NPM_C2_LOG_FILE !== '') {
+  if (process.env.NPM_C2_LOG_FILE !== undefined) {
     cfg.logFile = process.env.NPM_C2_LOG_FILE;
   }
   if (process.env.NPM_C2_STATE_FILE) cfg.stateFile = process.env.NPM_C2_STATE_FILE;
@@ -123,6 +137,21 @@ export function loadConfig(explicitPath) {
   if (process.env.NPM_C2_REVEAL_ENV !== undefined && process.env.NPM_C2_REVEAL_ENV !== '') {
     cfg.revealEnv = parseBoolFlag(process.env.NPM_C2_REVEAL_ENV);
   }
+  if (process.env.NPM_C2_FILESYSTEM_ROOT) cfg.filesystemRoot = process.env.NPM_C2_FILESYSTEM_ROOT;
+  if (process.env.NPM_C2_DOWNLOAD_DIR) cfg.downloadDir = process.env.NPM_C2_DOWNLOAD_DIR;
+  if (process.env.NPM_C2_ENABLE_FUN_OPS !== undefined && process.env.NPM_C2_ENABLE_FUN_OPS !== '') {
+    cfg.enableFunOps = parseBoolFlag(process.env.NPM_C2_ENABLE_FUN_OPS);
+  }
+  if (process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY !== undefined && process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY !== '') {
+    cfg.allowPublicRegistry = parseBoolFlag(process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY);
+  }
+  if (process.env.NPM_C2_ALLOW_INSECURE_HTTP !== undefined && process.env.NPM_C2_ALLOW_INSECURE_HTTP !== '') {
+    cfg.allowInsecureHttp = parseBoolFlag(process.env.NPM_C2_ALLOW_INSECURE_HTTP);
+  }
+  if (process.env.NPM_C2_LOG_LEVEL) cfg.logLevel = process.env.NPM_C2_LOG_LEVEL;
+  if (process.env.NPM_C2_REQUEST_TIMEOUT_MS) cfg.requestTimeoutMs = Number(process.env.NPM_C2_REQUEST_TIMEOUT_MS);
+  if (process.env.NPM_C2_MAX_RETRIES) cfg.maxRetries = Number(process.env.NPM_C2_MAX_RETRIES);
+  if (process.env.NPM_C2_RETRY_BASE_DELAY_MS) cfg.retryBaseDelayMs = Number(process.env.NPM_C2_RETRY_BASE_DELAY_MS);
 
   // The auth token is ONLY ever read from the environment — never from a file.
   cfg.token = process.env.NPM_C2_TOKEN || '';
@@ -137,9 +166,18 @@ export function loadConfig(explicitPath) {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`registryUrl must be http(s): "${cfg.registryUrl}"`);
   }
-  cfg.registryUrl = cfg.registryUrl.replace(/\/+$/, '');
-  if (!cfg.packageName || typeof cfg.packageName !== 'string') {
-    throw new Error('packageName must be a non-empty string');
+  if (parsed.username || parsed.password) {
+    throw new Error('registryUrl must not contain credentials; use NPM_C2_TOKEN');
+  }
+  if (parsed.search || parsed.hash) {
+    throw new Error('registryUrl must not contain a query string or fragment');
+  }
+  cfg.registryUrl = parsed.href.replace(/\/+$/, '');
+  if (typeof cfg.packageName !== 'string' || cfg.packageName.length > 214 || !PACKAGE_NAME_RE.test(cfg.packageName)) {
+    throw new Error('packageName must be a valid lowercase npm package name');
+  }
+  if (cfg.agentId && !AGENT_ID_RE.test(cfg.agentId)) {
+    throw new Error('agentId must contain 1-64 ASCII letters, digits, or underscores');
   }
   cfg.pollIntervalSec = Number(cfg.pollIntervalSec);
   if (!Number.isFinite(cfg.pollIntervalSec) || cfg.pollIntervalSec <= 0) {
@@ -149,7 +187,45 @@ export function loadConfig(explicitPath) {
     throw new Error(`maxFileBytes must be a positive number, got ${cfg.maxFileBytes}`);
   }
   cfg.maxFileBytes = Math.floor(Number(cfg.maxFileBytes));
+  if (cfg.maxFileBytes > MAX_FILE_BYTES) {
+    throw new Error(`maxFileBytes must not exceed ${MAX_FILE_BYTES}`);
+  }
   cfg.revealEnv = parseBoolFlag(cfg.revealEnv);
+  cfg.enableFunOps = parseBoolFlag(cfg.enableFunOps);
+  cfg.allowPublicRegistry = parseBoolFlag(cfg.allowPublicRegistry);
+  cfg.allowInsecureHttp = parseBoolFlag(cfg.allowInsecureHttp);
+  cfg.filesystemRoot = path.resolve(String(cfg.filesystemRoot));
+  const rootStat = fs.statSync(cfg.filesystemRoot, { throwIfNoEntry: false });
+  if (!rootStat?.isDirectory()) {
+    throw new Error(`filesystemRoot must be an existing directory: "${cfg.filesystemRoot}"`);
+  }
+  cfg.filesystemRoot = fs.realpathSync(cfg.filesystemRoot);
+  cfg.downloadDir = path.resolve(String(cfg.downloadDir));
+  if (!LOG_LEVELS.has(cfg.logLevel)) {
+    throw new Error(`logLevel must be one of ${[...LOG_LEVELS].join(', ')}`);
+  }
+  cfg.requestTimeoutMs = Number(cfg.requestTimeoutMs);
+  if (!Number.isInteger(cfg.requestTimeoutMs) || cfg.requestTimeoutMs < 100 || cfg.requestTimeoutMs > 120_000) {
+    throw new Error('requestTimeoutMs must be an integer from 100 to 120000');
+  }
+  cfg.maxRetries = Number(cfg.maxRetries);
+  if (!Number.isInteger(cfg.maxRetries) || cfg.maxRetries < 0 || cfg.maxRetries > 10) {
+    throw new Error('maxRetries must be an integer from 0 to 10');
+  }
+  cfg.retryBaseDelayMs = Number(cfg.retryBaseDelayMs);
+  if (!Number.isInteger(cfg.retryBaseDelayMs) || cfg.retryBaseDelayMs < 10 || cfg.retryBaseDelayMs > 60_000) {
+    throw new Error('retryBaseDelayMs must be an integer from 10 to 60000');
+  }
+  if (cfg.token === 'npm_replace_me') {
+    throw new Error('NPM_C2_TOKEN is still the example placeholder; set a real scoped token');
+  }
+  const isLoopback = ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname);
+  if (cfg.token && parsed.protocol === 'http:' && !isLoopback && !cfg.allowInsecureHttp) {
+    throw new Error('refusing to send NPM_C2_TOKEN over plaintext HTTP; set allowInsecureHttp only for an isolated lab');
+  }
+  if (parsed.hostname === 'registry.npmjs.org' && !cfg.allowPublicRegistry) {
+    throw new Error('registry.npmjs.org requires the explicit allowPublicRegistry safety opt-in');
+  }
 
   return cfg;
 }
