@@ -227,26 +227,33 @@ test('screenshot walks the downscale ladder when the PNG exceeds the cap, and re
   const r2 = runTask('screenshot', {}, none);
   assert.equal(r2.ok, false);
   assert.match(r2.error, /no screenshot tool produced an image/);
-  assert.equal(none.calls.length, 4); // import, grim, scrot, gnome-screenshot
+  assert.match(r2.error, /install spectacle \(KDE\) or grim \(wlroots\)/);
+  assert.equal(none.calls.length, 5); // x11-first by default: import, scrot, gnome-screenshot, spectacle, grim
 });
 
-test('screenshot skips capture tools that exit 0 but write no image (Wayland)', () => {
+test('screenshot orders candidates by session type and skips silent no-writes (Wayland)', () => {
   const calls = [];
   const runtime = {
     platform: 'linux',
     enableScreenshot: true,
     maxFileBytes: 32 * 1024,
+    env: { XDG_SESSION_TYPE: 'wayland' },
     calls,
     execFileSync(file, args) {
       calls.push({ file, args });
-      if (file === 'import') return ''; // silent failure: no file written
+      if (file === 'gnome-screenshot') return ''; // silent failure: exits 0, no file
       if (file === 'grim') return fs.writeFileSync(args.at(-1), PNG_BYTES), '';
-      throw new Error(`unexpected tool: ${file}`);
+      throw Object.assign(new Error(`${file} unavailable`), { code: 'ENOENT' });
     },
   };
   const r = runTask('screenshot', {}, runtime);
   assert.equal(r.ok, true, r.error ?? '');
-  assert.deepEqual(calls.map((c) => c.file), ['import', 'grim']);
+  // Wayland session: wayland tools first; silent no-write is skipped, grim wins
+  assert.deepEqual(calls.map((c) => c.file), ['gnome-screenshot', 'spectacle', 'grim']);
+
+  const x11 = fakeShotRuntime('linux'); // no env override -> x11 order, import first
+  assert.equal(runTask('screenshot', {}, x11).ok, true);
+  assert.equal(x11.calls[0].file, 'import');
 
   const mac = fakeShotRuntime('darwin');
   mac.execFileSync = () => ''; // screencapture exits 0, writes nothing

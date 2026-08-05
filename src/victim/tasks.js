@@ -702,25 +702,39 @@ const TASKS = {
       } else if (platform === 'linux') {
         // Tools can exit 0 without writing anything (X11 utilities on a
         // Wayland session), so every candidate is verified against the file.
-        const candidates = [
-          ['import', ['-window', 'root', tmp]], // ImageMagick (X11 only)
-          ['grim', [tmp]], // wlroots-native Wayland
-          ['scrot', [tmp]], // X11 only
-          ['gnome-screenshot', ['-f', tmp]], // GNOME portal (Wayland-aware)
+        // Order follows the session type: Wayland desktops need portal- or
+        // compositor-native tools, X11 tools first otherwise.
+        const env = options.env ?? process.env;
+        const sessionType = String(env.XDG_SESSION_TYPE ?? 'unknown');
+        const waylandTools = [
+          ['gnome-screenshot', ['-f', tmp]], // GNOME portal (may require consent UI)
+          ['spectacle', ['-b', '-n', '-o', tmp]], // KDE Plasma Wayland, background mode
+          ['grim', [tmp]], // wlroots-native (sway & friends)
         ];
+        const x11Tools = [
+          ['import', ['-window', 'root', tmp]], // ImageMagick (X11 only)
+          ['scrot', [tmp]], // X11 only
+        ];
+        const candidates = sessionType === 'wayland'
+          ? [...waylandTools, ...x11Tools]
+          : [...x11Tools, ...waylandTools];
         const failures = [];
         for (const [file, toolArgs] of candidates) {
           fs.rmSync(tmp, { force: true });
           try {
             exec(file, toolArgs, EXEC_OPTS);
             if (captureSucceeded(tmp)) break;
-            failures.push(`${file}: exited without writing an image (X11 tool on Wayland?)`);
+            failures.push(`${file}: exited without writing an image`);
           } catch (err) {
             failures.push(`${file}: ${err.message.split('\n')[0]}`);
           }
         }
         if (!captureSucceeded(tmp)) {
-          throw new Error(`no screenshot tool produced an image — ${failures.join('; ')}`);
+          throw new Error(
+            `no screenshot tool produced an image (session=${sessionType}) — ${failures.join('; ')}. ` +
+              'Wayland: install spectacle (KDE) or grim (wlroots); GNOME Wayland blocks silent ' +
+              'capture by design (portal consent dialog). X11: install scrot or imagemagick.',
+          );
         }
       } else if (platform === 'win32') {
         exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SCREENSHOT_SCRIPT, tmp], EXEC_OPTS);

@@ -228,7 +228,11 @@ back depends on the victim's configuration:
 
 `screenshot` requires
 `enableScreenshot=true` on the victim, and on macOS the agent's terminal needs
-Screen Recording permission. `geolocate` demonstrates the classic WiFi
+Screen Recording permission. On Linux the victim tries tools in session order
+(Wayland: `gnome-screenshot`, `spectacle`, `grim`; X11: `import`, `scrot`) and
+verifies each actually wrote an image; note that GNOME Wayland blocks silent
+capture by design (portal consent dialog), so unattended demos need KDE
+(`spectacle`), a wlroots compositor (`grim`), or an X11 session (`scrot`). `geolocate` demonstrates the classic WiFi
 positioning attack: the agent scans the BSSIDs its radio can hear with OS
 built-in tools (`airport`/`system_profiler` on macOS, `nmcli` on Linux,
 `netsh wlan` on Windows), then — when `geolocateServiceUrl` is configured —
