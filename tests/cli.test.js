@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { decodeCommandTag, encodeAnnounceTag } from '../src/common/protocol.js';
+import { decodeCommandTag, encodeAnnounceTag, encodeCommandTag } from '../src/common/protocol.js';
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -35,45 +35,32 @@ function runCli(args, input, env) {
   });
 }
 
-test('CLI presence flow is unknown, then online, then invalidated by clean', async (t) => {
+test('CLI uses historical discovery, rejects unknown direct targets, and sends one broadcast', async (t) => {
   const agentId = 'agent1';
-  const firstHeartbeat = encodeAnnounceTag(agentId, {
+  const oldHeartbeat = encodeAnnounceTag(agentId, {
     ts: 9_999_999_999_999,
     host: 'clock-ahead',
     cwd: '/lab',
-    lease: 'lease-a',
+    lease: 'legacy-lease',
   });
-  const nextHeartbeat = encodeAnnounceTag(agentId, {
-    ts: 1,
-    host: 'clock-behind',
-    cwd: '/lab',
-    lease: 'lease-b',
-  });
-  let getCount = 0;
-  let heartbeatDeleted = false;
-  let commandWrites = 0;
-  const commandPayloads = [];
+  const existingBroadcast = encodeCommandTag('all', 4, { op: 'ping', ts: 1 });
+  const tags = {
+    latest: '1.0.0',
+    [oldHeartbeat]: '1.0.0',
+    [existingBroadcast]: '1.0.0',
+  };
+  const commandWrites = [];
 
   const server = http.createServer((req, res) => {
     res.setHeader('content-type', 'application/json');
     if (req.method === 'GET') {
-      getCount++;
-      const heartbeat = getCount === 1 ? firstHeartbeat : nextHeartbeat;
-      res.end(JSON.stringify(heartbeatDeleted ? { latest: '1.0.0' } : {
-        latest: '1.0.0',
-        [heartbeat]: '1.0.0',
-      }));
+      res.end(JSON.stringify(tags));
       return;
     }
     if (req.method === 'PUT') {
-      commandWrites++;
       const tag = decodeURIComponent(req.url.split('/').at(-1));
-      commandPayloads.push(decodeCommandTag(tag).payload);
-      res.end('{}');
-      return;
-    }
-    if (req.method === 'DELETE') {
-      heartbeatDeleted = true;
+      commandWrites.push(decodeCommandTag(tag));
+      tags[tag] = '1.0.0';
       res.end('{}');
       return;
     }
@@ -104,17 +91,97 @@ test('CLI presence flow is unknown, then online, then invalidated by clean', asy
   };
   const result = await runCli(
     ['src/attacker/cli.js', '--config', configFile],
-    `agents\nagents\ntask ${agentId} ping\ntask all ping\nclean\nagents\nexit\n`,
+    `agents\ntask missing ping\ntask ${agentId} ping\ntask all ping\nagents\nexit\n`,
     env,
   );
 
   assert.equal(result.code, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /agent1\s+unknown/);
-  assert.match(result.stdout, /agent1\s+online/);
-  assert.match(result.stdout, /sent: task #1 ping -> agent1/);
-  assert.match(result.stdout, /fan-out complete: 1 agent\(s\)/);
-  assert.match(result.stdout, /deleted 1\/1 lab tags/);
-  assert.ok(result.stdout.lastIndexOf('agent1  unknown') > result.stdout.indexOf('deleted 1/1 lab tags'));
-  assert.equal(commandWrites, 2);
-  assert.deepEqual(commandPayloads.map((payload) => payload.lease), ['lease-b', 'lease-b']);
+  assert.match(result.stdout, /agent1\s+known/);
+  assert.doesNotMatch(result.stdout, /clock-ahead|\/lab|online|offline|unknown/);
+  assert.match(result.stdout, /agent "missing" is not known; task not sent/);
+  assert.match(result.stdout, /sent: task #5 ping -> agent1/);
+  assert.match(result.stdout, /sent: task #6 ping -> all/);
+  assert.equal(commandWrites.length, 2);
+  assert.deepEqual(commandWrites.map(({ agentId: target, seq }) => [target, seq]), [
+    [agentId, 5],
+    ['all', 6],
+  ]);
+  assert.deepEqual(commandWrites.map(({ payload }) => payload.lease), [undefined, undefined]);
+});
+
+test('CLI polling preserves locally sent commands beyond the legacy task TTL', async (t) => {
+  const agentId = 'agent1';
+  const sentAt = Date.now() - 121_000;
+  const command = encodeCommandTag(agentId, 7, { op: 'ping', args: {}, ts: sentAt });
+  const tags = {
+    latest: '1.0.0',
+    [command]: '1.0.0',
+  };
+  const deletedTags = [];
+
+  const server = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.method === 'GET') {
+      res.end(JSON.stringify(tags));
+      return;
+    }
+    if (req.method === 'DELETE') {
+      const tag = decodeURIComponent(req.url.split('/').at(-1));
+      deletedTags.push(tag);
+      delete tags[tag];
+      res.end('{}');
+      return;
+    }
+    res.statusCode = 405;
+    res.end('{}');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-cli-'));
+  const stateFile = path.join(tmp, 'attacker-state.json');
+  const configFile = path.join(tmp, 'config.json');
+  const registryUrl = `http://127.0.0.1:${server.address().port}`;
+  fs.writeFileSync(stateFile, JSON.stringify({
+    nextSeq: { [agentId]: 7 },
+    sent: 1,
+    received: 0,
+    perAgent: {},
+    seenResults: [],
+    agents: [agentId],
+    history: [{
+      dir: 'out',
+      ts: sentAt,
+      target: agentId,
+      seq: 7,
+      op: 'ping',
+      args: {},
+      tag: command,
+    }],
+  }));
+  fs.writeFileSync(configFile, JSON.stringify({
+    registryUrl,
+    packageName: 'lab-package',
+    pollIntervalSec: 10,
+    stateFile,
+  }));
+
+  const env = {
+    ...process.env,
+    NPM_C2_ENV_FILE: path.join(tmp, 'missing-env.sh'),
+    NPM_C2_REGISTRY_URL: registryUrl,
+    NPM_C2_PACKAGE_NAME: 'lab-package',
+    NPM_C2_POLL_INTERVAL: '10',
+    NPM_C2_STATE_FILE: stateFile,
+    NPM_C2_TOKEN: 'test-token',
+  };
+  const result = await runCli(
+    ['src/attacker/cli.js', '--config', configFile],
+    'poll\nexit\n',
+    env,
+  );
+
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  assert.deepEqual(deletedTags, [], 'polling must not reap an unconsumed local command by age');
+  assert.equal(tags[command], '1.0.0');
 });

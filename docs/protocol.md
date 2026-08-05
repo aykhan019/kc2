@@ -23,7 +23,7 @@ result-tag   = "x-res-" agent-id "-" seq "-" chunk "of" total "-" b64chunk
 announce-tag = "x-ann-" agent-id "-" b64payload
 
 agent-id    = 1*64( ALPHA / DIGIT / "_" )    ; no "-" allowed
-seq         = 1*DIGIT                        ; positive integer, per-target
+seq         = 1*DIGIT                        ; positive integer, globally allocated
 chunk/total = 1*DIGIT                        ; 1-based chunk index
 b64payload  = base64url-no-pad(JSON)         ; may itself contain "-"
 ```
@@ -34,7 +34,7 @@ Examples:
 x-cmd-a1b2c3d4-7-eyJvcCI6InBpbmcifQ -> 1.0.0
 x-res-a1b2c3d4-7-1of2-eyJzZXEiOjcsIm9rIjp0cnVlLCJvdXRwdXQiOiJwb -> 1.0.0
 x-res-a1b2c3d4-7-2of2-25nIn0 -> 1.0.0
-x-ann-a1b2c3d4-eyJ0cyI6MTcyMDAwMDAwMDAwMH0 -> 1.0.0
+x-ann-a1b2c3d4-eyJ2IjoxfQ -> 1.0.0
 ```
 
 ### Fields
@@ -46,11 +46,11 @@ x-ann-a1b2c3d4-eyJ0cyI6MTcyMDAwMDAwMDAwMH0 -> 1.0.0
   broadcast. In result tags it is the *responding* agent's id. Restricted to
   `[A-Za-z0-9_]` so the `-`-separated grammar stays unambiguous even though
   the base64url alphabet includes `-`.
-- **`seq`** — sequence number, monotonically increasing **per target**
-  (the attacker keeps a separate counter for each `agent-id`, including the
-  `all` broadcast channel). Victims process a command only if `seq` is
-  greater than the last processed seq for that target — this is the dedup
-  mechanism.
+- **`seq`** — sequence number allocated monotonically across all targets by
+  the attacker, so direct and broadcast results from one victim cannot share
+  an `<agentId>:<seq>` identity. Victims still process a command only if
+  `seq` is greater than the last processed seq for that command target — this
+  per-target comparison is the dedup mechanism.
 - **chunk spec `<chunk>of<total>`** — result payloads are split into 1-based
   chunks. `1of3`, `2of3`, `3of3` reassemble (in chunk order) to the full
   base64url string. The word `of` is used instead of `/` because `/` is
@@ -64,7 +64,7 @@ x-ann-a1b2c3d4-eyJ0cyI6MTcyMDAwMDAwMDAwMH0 -> 1.0.0
 Command payload (JSON):
 
 ```json
-{ "op": "<24 ops, see src/common/ops.js>", "args": { "text": "...", "path": "...", "url": "..." }, "ts": 1720000000000, "lease": "a1b2c3d4e5f6" }
+{ "op": "<24 ops, see src/common/ops.js>", "args": { "text": "...", "path": "...", "url": "..." }, "ts": 1720000000000 }
 ```
 
 `op` is restricted to the victim's hard-coded mock allowlist (defined with
@@ -95,29 +95,23 @@ Result payload (JSON):
 { "seq": 8, "op": "getfile", "ok": true, "output": "/etc/hosts (1024 bytes)", "file": { "name": "hosts", "size": 1024, "dataB64": "..." }, "ts": 1720000002000 }
 ```
 
-## Announce tags (agent heartbeat)
+## Announce tags (stable agent discovery)
 
-The victim publishes a rolling **announce tag** so the attacker CLI can show
-agent presence even before any task runs:
+The victim publishes one deterministic **announce tag** so the attacker CLI
+can discover its agent id before any task runs:
 
 ```json
-{ "ts": 1720000000000, "lease": "a1b2c3d4e5f6", "cwd": "/home/lab", "host": "vm1" }
+{ "v": 1 }
 ```
 
-Announce tags carry no `seq`. A victim publishes a replacement heartbeat every
-`max(30 seconds, pollIntervalSec)`, then removes its older announce tag. The
-attacker records when it observes a distinct heartbeat tag using its own clock;
-the payload `ts` is metadata only. Re-reading the same persistent tag does not
-refresh presence. The attacker reports `unknown` until it observes a heartbeat
-change, whenever registry freshness cannot be verified, and after `clean`.
-Three missed heartbeat windows then mark the agent offline. Heartbeats run on
-an independent async schedule while command results are uploaded.
-Each heartbeat also carries a short random lease. Direct commands echo the
-latest observed lease; the victim accepts its four most recent leases. This
-expires stale direct commands using heartbeat progression rather than comparing
-wall clocks. If optional `cwd`/`host` metadata would exceed npm's tag limit, it
-is shortened or omitted while `ts` and `lease` are retained.
-Announce tags are also removed by `clean` like every other lab tag.
+Announce tags carry no `seq`. The victim retries publication until it succeeds,
+then performs no periodic announcement writes. Because the payload is fixed,
+the same agent id produces the exact same tag across restarts. Announcements
+are historical discovery markers only: they carry no timestamp, lease, host,
+or cwd and make no online/offline claim. Decoders continue accepting older
+heartbeat-shaped announcement payloads, but the attacker ignores that metadata.
+Announce tags are included in explicit `clean` operations like every other lab
+tag; the victim does not remove its stable marker during shutdown.
 
 ## Size limit and chunking
 
@@ -134,9 +128,12 @@ npm caps dist-tag names at **214 characters**. The encoder enforces this:
 
 ## Sequencing and exactly-once execution
 
-- Attacker state (`attacker-state.json`) holds `nextSeq` per target.
-- Victim state (`victim-state.json`) holds `lastSeq` per target and its
-  `agentId` (generated and persisted on first run).
+- Attacker state (`attacker-state.json`) records the highest issued `seq` per
+  target and allocates each new command above the maximum across all targets.
+- Victim state (`victim-state.json`) holds `lastSeq` per target, its `agentId`,
+  and `commandBaselineVersion`. On the first successful registry read after
+  install or upgrade, the victim records the highest existing sequences for
+  its direct and `all` channels and executes none of those pre-existing tags.
 - The victim marks a command as processed **before** publishing the result,
   and persists state after every change. If publishing fails, the result may
   be lost, but the command will **not** be re-executed after a restart —
@@ -151,21 +148,18 @@ npm caps dist-tag names at **214 characters**. The encoder enforces this:
   it as lost instead of waiting forever.
 - Malformed tags are logged and skipped on both sides; they never abort a
   poll cycle.
-- Direct commands with a lease older than the victim's four-heartbeat window
-  advance sequence state but are never executed, preventing delayed execution
-  after reconnect without relying on synchronized clocks. The attacker also
-  removes command tags older than four windows using its own local clock.
 - A victim deletes a processed direct command tag after publishing its result.
-  The CLI implements `task all` as leased direct-command fan-out. Legacy
-  `x-cmd-all-*` tags remain decodable for protocol inspection but the runtime
-  rejects them because they cannot carry a safe per-agent lease.
+  `task all` publishes one broadcast tag, which each victim processes once in
+  its `all` deduplication channel and leaves available for other victims.
+- Commands published after initial baselining may execute after a later
+  reconnect. There is no liveness signal, lease, or wall-clock expiry.
 
 ## State machine (per command)
 
 ```
 attacker                       registry (dist-tags)                    victim
    |                                  |                                  |
-   |                                  |<-- PUT x-ann-<me>-... =1.0.0 ----|  (rolling heartbeat)
+   |                                  |<-- PUT x-ann-<me>-... =1.0.0 ----|  (stable discovery; once)
    |-- PUT x-cmd-<t>-<n>-... =1.0.0 ->|                                  |
    |                                  |<- GET dist-tags (poll) ----------|
    |                                  |---------- {..., x-cmd-...} ----->|
@@ -185,4 +179,6 @@ The attacker's `clean` command deletes **all** tags matching `x-cmd-*`,
 `x-res-*`, or `x-ann-*` via authenticated
 `DELETE /-/package/<pkg>/dist-tags/<tag>`, leaving only the package's
 ordinary tags (e.g. `latest`). Neither side ever deletes or modifies package
-*versions*.
+*versions*. On npmjs.org these DELETE operations currently require interactive
+2FA; bypass-2FA granular tokens cannot automate them. The local Verdaccio lab
+supports automatic cleanup.

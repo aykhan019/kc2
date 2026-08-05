@@ -27,13 +27,8 @@ export function parseBoolFlag(value) {
   return ['1', 'true', 'yes'].includes(value.trim().toLowerCase());
 }
 
-export function channelTimings(pollIntervalSec) {
-  const heartbeatMs = Math.max(30_000, Number(pollIntervalSec) * 1_000);
-  return {
-    heartbeatMs,
-    offlineMs: heartbeatMs * 3,
-    taskTtlMs: heartbeatMs * 4,
-  };
+export function taskTtlMs(pollIntervalSec) {
+  return Math.max(30_000, Number(pollIntervalSec) * 1_000) * 4;
 }
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;

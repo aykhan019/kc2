@@ -54,7 +54,7 @@ export class RegistryClient {
     // package document. Two overlapping writes from the same process silently
     // clobber each other (observed on registry.npmjs.org: a PUT returns 2xx
     // yet the tag never appears). Serialize all writes from this client so a
-    // process never races itself (e.g. heartbeat vs result chunk storm).
+    // process never races itself (e.g. announcement retry vs result chunks).
     this._writeQueue = Promise.resolve();
   }
 

