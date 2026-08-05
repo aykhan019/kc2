@@ -249,7 +249,7 @@ async function main() {
     logger,
   });
 
-  console.log(c(['bold', 'cyan'], 'npm-c2-lab attacker CLI (educational research only)'));
+  console.log(c(['bold', 'cyan'], 'KC2 attacker CLI (educational research only)'));
   console.log(`${dim('registry:')} ${cfg.registryUrl}  ${dim('package:')} ${cfg.packageName}`);
   if (!cfg.token) {
     console.log(c('yellow', 'warning: NPM_C2_TOKEN is not set — writes will fail with 401'));
@@ -262,7 +262,7 @@ async function main() {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: c('blue', 'npm-c2> '),
+    prompt: c('blue', 'kc2> '),
   });
 
   /** Print a live notification without eating the line the user is typing. */

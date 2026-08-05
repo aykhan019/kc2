@@ -87,7 +87,7 @@ cat > "${SEED_DIR}/package.json" <<EOF
 {
   "name": "${PKG_NAME}",
   "version": "1.0.0",
-  "description": "Placeholder package for the npm dist-tag C2 lab (educational)",
+  "description": "Placeholder package for the KC2 research lab (educational)",
   "main": "index.js",
   "license": "MIT"
 }

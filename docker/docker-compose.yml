@@ -2,7 +2,7 @@
 # Usage (from the repo root):
 #   docker compose -f docker/docker-compose.yml up -d registry setup victim
 #   docker compose -f docker/docker-compose.yml run --rm attacker
-name: npm-c2-lab
+name: kc2
 
 services:
   registry:
@@ -32,7 +32,7 @@ services:
       - lab
 
   setup:
-    image: npm-c2-lab-app
+    image: kc2-app
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -58,7 +58,7 @@ services:
       - lab
 
   victim:
-    image: npm-c2-lab-app
+    image: kc2-app
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -92,7 +92,7 @@ services:
       - lab
 
   attacker:
-    image: npm-c2-lab-app
+    image: kc2-app
     build:
       context: ..
       dockerfile: docker/Dockerfile

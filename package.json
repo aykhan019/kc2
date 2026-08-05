@@ -1,7 +1,7 @@
 {
-  "name": "npm-c2-lab",
+  "name": "kc2",
   "version": "1.0.0",
-  "description": "Educational research lab: indirect C2 channel over npm dist-tags (mock tasks only)",
+  "description": "KC2 educational research lab: indirect C2 channel over npm dist-tags (mock tasks only)",
   "type": "module",
   "private": true,
   "license": "MIT",

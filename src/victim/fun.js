@@ -14,7 +14,7 @@ const PS_DECODE_TEXT =
 const PS_SAY = `${PS_DECODE_TEXT} Add-Type -AssemblyName System.Speech; ` +
   '$speaker=New-Object System.Speech.Synthesis.SpeechSynthesizer; $speaker.Speak($text);';
 const PS_NOTIFY = `${PS_DECODE_TEXT} $shell=New-Object -ComObject WScript.Shell; ` +
-  '$null=$shell.Popup($text,5,"npm-c2-lab",64);';
+  '$null=$shell.Popup($text,5,"KC2",64);';
 const PS_BEEP =
   'Add-Type -AssemblyName System.Windows.Extensions -ErrorAction SilentlyContinue; ' +
   '[System.Media.SystemSounds]::Asterisk.Play(); Start-Sleep -Milliseconds 350;';
@@ -151,11 +151,11 @@ function notify(text, runtime) {
   if (runtime.platform === 'darwin') {
     execute(runtime, 'osascript', [
       '-e', 'on run argv',
-      '-e', 'display notification (item 1 of argv) with title "npm-c2-lab"',
+      '-e', 'display notification (item 1 of argv) with title "KC2"',
       '-e', 'end run',
       '--', text,
     ]);
-  } else if (runtime.platform === 'linux') execute(runtime, 'notify-send', ['npm-c2-lab', text]);
+  } else if (runtime.platform === 'linux') execute(runtime, 'notify-send', ['KC2', text]);
   else if (runtime.platform === 'win32') powershell(runtime, PS_NOTIFY, encoded(text));
   else throw new Error(`notify is not supported on ${runtime.platform}`);
 }
@@ -183,7 +183,7 @@ function bounce(runtime) {
       '-e', 'ObjC.import("AppKit"); $.NSApplication.sharedApplication.requestUserAttention(0); $.NSThread.sleepForTimeInterval(1);',
     ]);
   } else if (runtime.platform === 'linux') {
-    execute(runtime, 'notify-send', ['-u', 'critical', '-t', '2500', 'npm-c2-lab', 'Bounce!']);
+    execute(runtime, 'notify-send', ['-u', 'critical', '-t', '2500', 'KC2', 'Bounce!']);
   } else if (runtime.platform === 'win32') powershell(runtime, PS_BOUNCE);
   else throw new Error(`bounce is not supported on ${runtime.platform}`);
 }

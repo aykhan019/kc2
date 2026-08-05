@@ -2,7 +2,7 @@
 set -eu
 
 COMPOSE_FILE="docker/docker-compose.yml"
-PROJECT_NAME="npm-c2-smoke-$$"
+PROJECT_NAME="kc2-smoke-$$"
 
 compose() {
   docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"

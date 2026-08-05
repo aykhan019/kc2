@@ -1,7 +1,8 @@
-# npm-c2-lab — Indirect C2 over npm dist-tags
+# KC2 — Indirect C2 over npm dist-tags
 
-An **educational research lab** demonstrating an indirect command-and-control
-(C2) architecture that uses **npm dist-tags as the communication mailbox**,
+KC2 is an **educational research lab** demonstrating an indirect
+command-and-control (C2) architecture that uses **npm dist-tags as the
+communication mailbox**,
 inspired by the npm-c2 research. Built for understanding C2 channel design and
 **defender detection** — not for offensive use.
 
@@ -76,16 +77,16 @@ password when `LAB_PASS` is not supplied. Path operations are confined to the
 In the CLI:
 
 ```
-npm-c2> task all ping              # one broadcast tag for all polling agents
-npm-c2> task all whoami            # report mock identity details
-npm-c2> task all pwd               # where is the agent?
-npm-c2> task all ls .              # list the isolated victim workspace
-npm-c2> task all getfile sample.txt  # fetch a file from that workspace
-npm-c2> agents                     # list historically discovered agents
-npm-c2> history 10                 # last 10 requests/responses
-npm-c2> stats                      # local counters
-npm-c2> clean                      # delete all x-cmd-*/x-res-*/x-ann-* tags
-npm-c2> exit
+kc2> task all ping              # one broadcast tag for all polling agents
+kc2> task all whoami            # report mock identity details
+kc2> task all pwd               # where is the agent?
+kc2> task all ls .              # list the isolated victim workspace
+kc2> task all getfile sample.txt  # fetch a file from that workspace
+kc2> agents                     # list historically discovered agents
+kc2> history 10                 # last 10 requests/responses
+kc2> stats                      # local counters
+kc2> clean                      # delete all x-cmd-*/x-res-*/x-ann-* tags
+kc2> exit
 ```
 
 The CLI polls in the background while you type: agent discoveries and task

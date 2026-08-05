@@ -108,7 +108,7 @@ level: high
 rule Suspicious_npm_dist_tag_C2 {
     meta:
         description = "Detects npm dist-tag covert protocol tag names in memory or logs"
-        author = "npm-c2-lab"
+        author = "KC2"
         severity = "High"
     strings:
         $cmd_tag = /x-cmd-[A-Za-z0-9_]{1,64}-[0-9]+-[A-Za-z0-9_-]{10,}/

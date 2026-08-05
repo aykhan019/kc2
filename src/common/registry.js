@@ -71,7 +71,7 @@ export class RegistryClient {
   async #request(pathSuffix, { method = 'GET', body } = {}) {
     const headers = {
       accept: 'application/json',
-      'user-agent': 'npm-c2-lab/1.0 (educational research)',
+      'user-agent': 'KC2/1.0 (educational research)',
     };
     if (body !== undefined) headers['content-type'] = 'application/json';
     if (this.token) headers.authorization = `Bearer ${this.token}`;
