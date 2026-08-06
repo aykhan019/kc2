@@ -108,7 +108,7 @@ function pushHistory(state, entry) {
 // ---------------------------------------------------------------------------
 
 function parseTaskLine(line) {
-  const tokens = line.trim().split(/\s+/);
+  const tokens = tokenize(line);
   const [, target, op, ...rest] = tokens;
   if (!target || !op) {
     throw new Error('usage: task <agentId|all> <op> [args...]');
@@ -397,6 +397,24 @@ async function main() {
     if (tags.length > 1) console.log(c('dim', `  … +${tags.length - 1} more chunk tag(s)`));
   }
 
+  /** Dispatch an already validated task request through the normal safety checks. */
+  async function dispatchTask({ target, op, args }) {
+    try {
+      await pollOnce({ quiet: true });
+    } catch (err) {
+      logger.warn(`agent discovery refresh failed before task: ${err.message}`);
+    }
+
+    if (target === 'all') {
+      if (state.agents.length === 0) throw new Error('no known agents available; task not sent');
+      await sendTask('all', op, args);
+      return;
+    }
+    const agentId = resolveAgentReference(state, target);
+    assertKnownAgent(state, agentId ?? target);
+    await sendTask(agentId, op, args);
+  }
+
   // --- help rendering -------------------------------------------------------
 
   /** Render "left  description" rows with aligned columns. */
@@ -470,21 +488,7 @@ async function main() {
     },
 
     async task(line) {
-      const { target, op, args } = parseTaskLine(line);
-      try {
-        await pollOnce({ quiet: true });
-      } catch (err) {
-        logger.warn(`agent discovery refresh failed before task: ${err.message}`);
-      }
-
-      if (target === 'all') {
-        if (state.agents.length === 0) throw new Error('no known agents available; task not sent');
-        await sendTask('all', op, args);
-      } else {
-        const agentId = resolveAgentReference(state, target);
-        assertKnownAgent(state, agentId ?? target);
-        await sendTask(agentId, op, args);
-      }
+      await dispatchTask(parseTaskLine(line));
     },
 
     async attach(line) {
@@ -639,9 +643,14 @@ async function main() {
         console.log(section(`running chain "${name}" against ${flags.agent} (${steps.length} steps)`));
         for (const [i, step] of steps.entries()) {
           console.log(dim(`[${i + 1}/${steps.length}] ${step}`));
-          // Steps are validated bare task ops; dispatch through the normal
-          // task path so agent checks and payload validation stay central.
-          await commands.task(`task ${flags.agent} ${step}`);
+          const [op, ...rawArgs] = tokenize(step);
+          // Steps are validated on creation, then sent as structured requests
+          // so quoted arguments keep their boundaries at run time.
+          await dispatchTask({
+            target: flags.agent,
+            op,
+            args: parseOpArgs(op, rawArgs),
+          });
         }
         return;
       }

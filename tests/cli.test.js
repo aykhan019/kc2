@@ -253,7 +253,7 @@ test('CLI chain: flag-based add, run against a given agent, legacy migration', a
     ['src/attacker/cli.js', '--config', configFile],
     [
       'chain list',
-      'chain add -n recon -s "ping" -s "time"',
+      "chain add -n recon -s \"ping\" -s \"time\" -s 'exec printf \"hello world\"'",
       'chain list',
       'chain list recon',
       'chain run recon -a agent1',
@@ -267,16 +267,18 @@ test('CLI chain: flag-based add, run against a given agent, legacy migration', a
   assert.equal(result.code, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /migrated playbooks\.json -> chains\.json/);
   assert.match(result.stdout, /warmup\s+1 step\(s\)/);
-  assert.match(result.stdout, /added chain recon \(2 step\(s\)/);
-  assert.match(result.stdout, /recon\s+2 step\(s\)/);
+  assert.match(result.stdout, /added chain recon \(3 step\(s\)/);
+  assert.match(result.stdout, /recon\s+3 step\(s\)/);
   assert.match(result.stdout, /1\. ping/);
-  assert.match(result.stdout, /running chain "recon" against agent1 \(2 steps\)/);
+  assert.match(result.stdout, /running chain "recon" against agent1 \(3 steps\)/);
   assert.match(result.stdout, /sent: task #1 ping -> agent1/);
   assert.match(result.stdout, /sent: task #2 time -> agent1/);
+  assert.match(result.stdout, /sent: task #3 exec -> agent1/);
   assert.match(result.stdout, /deleted chain recon/);
-  assert.deepEqual(commandWrites.map(({ agentId: target, seq, payload }) => [target, seq, payload.op]), [
-    [agentId, 1, 'ping'],
-    [agentId, 2, 'time'],
+  assert.deepEqual(commandWrites.map(({ agentId: target, seq, payload }) => [target, seq, payload.op, payload.args]), [
+    [agentId, 1, 'ping', {}],
+    [agentId, 2, 'time', {}],
+    [agentId, 3, 'exec', { cmd: 'printf', args: ['hello world'] }],
   ]);
   // delete leaves the migrated chain behind in a valid store
   assert.deepEqual(JSON.parse(fs.readFileSync(chainFile, 'utf8')), { warmup: ['ping'] });
