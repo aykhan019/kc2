@@ -42,14 +42,16 @@ Runtime state lives in the working directory:
 ## State, backup, and restore
 
 State files are required for at-most-once processing and monotonically
-allocated task sequences. Back up the verdaccio storage directory and both
-state files as one consistent set while processes are stopped. Restoring only
+allocated task sequences. Back up the verdaccio storage directory, both
+state files, and the attacker's `chains.json` as one consistent set while
+processes are stopped. Restoring only
 one component can cause old tags to be baselined, results to be reported
 again, or sequence history to diverge.
 
 For a disposable reset, stop the victim, attacker, and verdaccio, then delete
-the state files, `.lab-token`, and the verdaccio storage directory, and re-run
+the state files, `chains.json`, `.lab-token`, and the verdaccio storage directory, and re-run
 `sh scripts/setup-registry.sh`. This permanently removes registry data, state,
+saved chains,
 the local token, and downloaded files.
 
 ## Monitoring and failure handling

@@ -190,11 +190,33 @@ response history, stats). Delete them to reset a side.
 |---|---|
 | `agents` | list historically discovered agents and result counts; no liveness claim |
 | `task <agentId\|all> <op> [args...]` | task one known agent or publish one broadcast for all agents |
+| `chain list\|add\|delete\|run` | named, agent-agnostic task sequences (`chains.json`) |
 | `history [n]` | show the last n requests/responses (default 20, persisted) |
 | `poll` | fetch new results; show locally pending direct tasks while waiting |
 | `clean` | delete all `x-cmd-*`/`x-res-*`/`x-ann-*` tags (leaves only `latest`) |
 | `stats` | local counters: sent, received, per-agent |
 | `help`, `exit` | — |
+
+`chain` manages named, reusable task sequences stored in `chains.json`
+(owner-only, next to the attacker state file). A chain is a list of bare
+task ops — no target agent baked in — so the same sequence can be run
+against any agent, chosen at run time:
+
+```
+chain add -n recon -s "cd .." -s "ls" -s "exec pwd"
+chain run recon -a agent1        # also --agent / --agentId, or 'all'
+chain list [name]
+chain delete recon
+```
+
+Flags: `-n`/`--name`, `-a`/`--agent`/`--agentId`, and repeatable
+`-s`/`--step`; quote steps that contain spaces, and `--flag=value` works
+too. Steps are validated when added (known op, correct arguments), and
+running a chain dispatches each step through the normal `task` path, so
+agent checks stay identical to typing the commands by hand. A legacy
+`playbooks.json` from the playbook era is migrated automatically on first
+`chain` use — its `task <agentId>` prefixes are stripped — and kept as
+`playbooks.json.bak`.
 
 Ops without arguments: `echo <text>`, `ping`, `time`, `sysinfo`, `whoami`,
 `env` (names listed, all values redacted unless the victim opts in with
