@@ -190,6 +190,8 @@ response history, stats). Delete them to reset a side.
 |---|---|
 | `agents` | list historically discovered agents and result counts; no liveness claim |
 | `task <agentId\|all> <op> [args...]` | task one known agent or publish one broadcast for all agents |
+| `attach <agentId>` | attach the prompt to one known agent; bare task operations target it |
+| `detach` | leave attached-agent mode and restore the normal prompt |
 | `chain list\|add\|delete\|run` | named, agent-agnostic task sequences (`chains.json`) |
 | `history [n]` | show the last n requests/responses (default 20, persisted) |
 | `poll` | fetch new results; show locally pending direct tasks while waiting |
@@ -202,6 +204,12 @@ anything past ~90 chars of arguments) are split automatically into
 `<chunk>of<total>` command tags; the victim buffers the parts and executes
 the command only once every chunk is visible, so long commands are safe to
 type or paste.
+
+`attach <agentId>` is an in-memory routing shortcut for a known agent: while
+attached, entering a bare KC2 task operation (for example, `pwd`) dispatches
+it to that agent. Local CLI commands still take precedence. Use `detach` to
+restore the `kc2> ` prompt and normal routing. Attached mode does not change
+delivery semantics; results still arrive asynchronously through the registry.
 
 `chain` manages named, reusable task sequences stored in `chains.json`
 (owner-only, next to the attacker state file). A chain is a list of bare

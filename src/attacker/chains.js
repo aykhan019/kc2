@@ -22,11 +22,10 @@ import { getOpDef, parseOpArgs } from '../common/ops.js';
 export const CHAIN_NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
 export const MAX_CHAINS = 50;
 export const MAX_STEPS = 100;
-export const MAX_STEP_LEN = 500;
+export const MAX_STEP_LEN = 4096; // chars of one step string (op + args)
 export const CHAIN_FILE_MAX_BYTES = 256 * 1024;
 export const CHAINS_FILE = 'chains.json';
 export const LEGACY_PLAYBOOKS_FILE = 'playbooks.json';
-
 const LEGACY_STEP_RE = /^task\s+\S+\s+(.+)$/s;
 
 /**
