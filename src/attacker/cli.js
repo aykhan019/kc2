@@ -9,6 +9,7 @@
 //   agents                      list historically discovered agents
 //   task <agentId|all> <op> [args...]   task one known agent or broadcast to all
 //                         (op allowlist: src/common/ops.js)
+//   playbook list|show|add|delete|run   named command sequences (playbooks.json)
 //   history [n]                 show the last n requests/responses (default 20)
 //   poll                        fetch results or show locally pending direct tasks
 //   clean                       delete all lab tags (x-cmd-*/x-res-*/x-ann-*)
@@ -55,6 +56,14 @@ export {
   pendingDirectTasks,
   sanitizeRegistryText,
 } from './text.js';
+import {
+  assertValidName,
+  deletePlaybook,
+  loadPlaybooks,
+  parseSteps,
+  savePlaybooks,
+  setPlaybook,
+} from './playbooks.js';
 
 const tty = process.stdout.isTTY;
 const c = (color, s) => (tty ? styleText(color, s) : s);
@@ -420,6 +429,9 @@ async function main() {
     help() {
       const commandRows = [
         ['task <agentId|all> <op> [args]', 'task one known agent or broadcast to all'],
+        ['playbook add <name> <cmd> then <cmd> ...', 'save a named command sequence'],
+        ['playbook run <name>', 'run a saved sequence step by step'],
+        ['playbook list|show|delete', 'inspect or remove saved sequences'],
         ['agents', 'list historically discovered agents'],
         ['history [n]', 'last n requests/responses (default 20)'],
         ['poll', 'fetch results or show locally pending direct tasks'],
@@ -527,6 +539,75 @@ async function main() {
         cleaning = false;
         save();
       }
+    },
+
+    async playbook(line) {
+      const file = path.join(path.dirname(statePath), 'playbooks.json');
+      const tokens = line.trim().split(/\s+/);
+      const sub = tokens[1] ?? 'list';
+      const name = tokens[2];
+      const map = loadPlaybooks(file);
+
+      if (sub === 'list') {
+        const names = Object.keys(map);
+        if (names.length === 0) {
+          console.log(dim('no playbooks — add one with: playbook add <name> <cmd> then <cmd> ...'));
+          console.log(dim(`(stored in ${file}, also editable by hand as JSON)`));
+          return;
+        }
+        for (const n of names) {
+          console.log(`  ${cmdName(n)}  ${dim(`${map[n].length} step(s)`)}`);
+        }
+        return;
+      }
+
+      if (sub === 'show') {
+        const steps = map[name];
+        if (!steps) throw new Error(`unknown playbook "${name ?? ''}" — see: playbook list`);
+        console.log(section(`playbook "${name}" (${steps.length} steps):`));
+        steps.forEach((s, i) => console.log(`  ${dim(`${i + 1}.`)} ${s}`));
+        return;
+      }
+
+      if (sub === 'add') {
+        assertValidName(name);
+        const marker = ` ${name} `;
+        const idx = line.indexOf(marker);
+        const steps = parseSteps(idx === -1 ? '' : line.slice(idx + marker.length));
+        const next = setPlaybook(map, name, steps);
+        savePlaybooks(file, next);
+        console.log(
+          `${Object.hasOwn(map, name) ? 'replaced' : 'added'} playbook ${cmdName(name)} ` +
+            dim(`(${steps.length} step(s), saved to ${file})`),
+        );
+        return;
+      }
+
+      if (sub === 'delete') {
+        savePlaybooks(file, deletePlaybook(map, name));
+        console.log(`deleted playbook ${cmdName(name)}`);
+        return;
+      }
+
+      if (sub === 'run') {
+        const steps = map[name];
+        if (!steps) throw new Error(`unknown playbook "${name ?? ''}" — see: playbook list`);
+        console.log(section(`running playbook "${name}" (${steps.length} steps)`));
+        for (const [i, step] of steps.entries()) {
+          const cmd = step.split(/\s+/)[0];
+          if (cmd === 'playbook' || cmd === 'exit' || cmd === 'quit') {
+            throw new Error(`step ${i + 1} ("${step}") is not allowed inside a playbook`);
+          }
+          if (!commands[cmd]) {
+            throw new Error(`step ${i + 1}: unknown command "${cmd}" — fix the playbook (${file})`);
+          }
+          console.log(dim(`[${i + 1}/${steps.length}] ${step}`));
+          await commands[cmd](step);
+        }
+        return;
+      }
+
+      console.log('usage: playbook list | show <name> | add <name> <cmd> then <cmd> ... | delete <name> | run <name>');
     },
 
     stats() {

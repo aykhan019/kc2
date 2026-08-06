@@ -185,3 +185,83 @@ test('CLI polling preserves locally sent commands beyond the legacy task TTL', a
   assert.deepEqual(deletedTags, [], 'polling must not reap an unconsumed local command by age');
   assert.equal(tags[command], '1.0.0');
 });
+
+test('CLI playbook: add from the prompt, then run the saved sequence in order', async (t) => {
+  const agentId = 'agent1';
+  const announce = encodeAnnounceTag(agentId, {
+    ts: 9_999_999_999_999,
+    host: 'h',
+    cwd: '/lab',
+    lease: 'legacy-lease',
+  });
+  const tags = { latest: '1.0.0', [announce]: '1.0.0' };
+  const commandWrites = [];
+
+  const server = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.method === 'GET') {
+      res.end(JSON.stringify(tags));
+      return;
+    }
+    if (req.method === 'PUT') {
+      const tag = decodeURIComponent(req.url.split('/').at(-1));
+      commandWrites.push(decodeCommandTag(tag));
+      tags[tag] = '1.0.0';
+      res.end('{}');
+      return;
+    }
+    res.statusCode = 405;
+    res.end('{}');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-cli-'));
+  const stateFile = path.join(tmp, 'attacker-state.json');
+  const playbookFile = path.join(tmp, 'playbooks.json');
+  const configFile = path.join(tmp, 'config.json');
+  fs.writeFileSync(configFile, JSON.stringify({
+    registryUrl: `http://127.0.0.1:${server.address().port}`,
+    packageName: 'lab-package',
+    pollIntervalSec: 10,
+    stateFile,
+  }));
+
+  const env = {
+    ...process.env,
+    NPM_C2_ENV_FILE: path.join(tmp, 'missing-env.sh'),
+    NPM_C2_REGISTRY_URL: `http://127.0.0.1:${server.address().port}`,
+    NPM_C2_PACKAGE_NAME: 'lab-package',
+    NPM_C2_POLL_INTERVAL: '10',
+    NPM_C2_STATE_FILE: stateFile,
+    NPM_C2_TOKEN: 'test-token',
+  };
+  const result = await runCli(
+    ['src/attacker/cli.js', '--config', configFile],
+    [
+      'playbook add recon task agent1 ping then task agent1 time',
+      'playbook list',
+      'playbook show recon',
+      'playbook run recon',
+      'playbook delete recon',
+      'exit',
+      '',
+    ].join('\n'),
+    env,
+  );
+
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /added playbook recon \(2 step\(s\)/);
+  assert.match(result.stdout, /recon\s+2 step\(s\)/);
+  assert.match(result.stdout, /1\. task agent1 ping/);
+  assert.match(result.stdout, /running playbook "recon" \(2 steps\)/);
+  assert.match(result.stdout, /sent: task #1 ping -> agent1/);
+  assert.match(result.stdout, /sent: task #2 time -> agent1/);
+  assert.match(result.stdout, /deleted playbook recon/);
+  assert.deepEqual(commandWrites.map(({ agentId: target, seq, payload }) => [target, seq, payload.op]), [
+    [agentId, 1, 'ping'],
+    [agentId, 2, 'time'],
+  ]);
+  // delete leaves an empty (but valid) store behind
+  assert.deepEqual(JSON.parse(fs.readFileSync(playbookFile, 'utf8')), {});
+});
