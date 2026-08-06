@@ -9,6 +9,7 @@ import {
   defaultState,
   createCommandBaseline,
   encodeStableAnnouncementTag,
+  formatStartupReport,
   loadState,
   processDistTags,
   publishResultTags,
@@ -95,6 +96,43 @@ test('task dispatch: unknown ops are refused, never executed', () => {
 
 test('allowlist matches the protocol op set', () => {
   assert.deepEqual([...ALLOWED_OPS].sort(), [...TASK_OPS].sort());
+});
+
+test('startup report presents grouped victim configuration without the token', () => {
+  const report = formatStartupReport({
+    registryUrl: 'http://localhost:4873',
+    packageName: 'my-package',
+    pollIntervalSec: 10,
+    requestTimeoutMs: 10_000,
+    maxRetries: 3,
+    retryBaseDelayMs: 500,
+    maxFileBytes: 32_768,
+    revealEnv: false,
+    enableFunOps: true,
+    enableScreenshot: false,
+    enableGeolocate: false,
+    enableExec: false,
+    uploadUrl: '',
+    uploadUrls: [],
+    logLevel: 'info',
+    logFile: '',
+  }, '/tmp/victim-state.json', AGENT, '/workspace');
+
+  assert.deepEqual(report, [
+    ['info', 'victim agent starting'],
+    ['info', '  identity', { agentId: AGENT, stateFile: '/tmp/victim-state.json' }],
+    ['info', '  connection', {
+      registry: 'http://localhost:4873', package: 'my-package', pollIntervalSec: 10,
+      requestTimeoutMs: 10_000, maxRetries: 3, retryBaseDelayMs: 500, authenticated: false,
+    }],
+    ['info', '  workspace', { cwd: '/workspace', maxFileBytes: 32_768 }],
+    ['info', '  task controls', {
+      revealEnv: false, funOps: true, screenshot: false, geolocate: false, exec: false,
+      uploadEndpoints: 0,
+    }],
+    ['info', '  logging', { level: 'info', file: 'disabled' }],
+    ['info', 'victim agent ready; polling for new commands (Ctrl-C to stop)'],
+  ]);
 });
 
 // ---------------------------------------------------------------------------

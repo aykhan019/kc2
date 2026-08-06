@@ -171,6 +171,43 @@ export function encodeStableAnnouncementTag(agentId) {
 }
 
 /**
+ * Produce the ordered startup report shown by the victim CLI. Keep secrets
+ * out of this structure: it is written to both the terminal and log file.
+ */
+export function formatStartupReport(cfg, statePath, agentId, cwd = process.cwd()) {
+  return [
+    ['info', 'victim agent starting'],
+    ['info', '  identity', { agentId, stateFile: statePath }],
+    ['info', '  connection', {
+      registry: cfg.registryUrl,
+      package: cfg.packageName,
+      pollIntervalSec: cfg.pollIntervalSec,
+      requestTimeoutMs: cfg.requestTimeoutMs,
+      maxRetries: cfg.maxRetries,
+      retryBaseDelayMs: cfg.retryBaseDelayMs,
+      authenticated: Boolean(cfg.token),
+    }],
+    ['info', '  workspace', { cwd, maxFileBytes: cfg.maxFileBytes }],
+    ['info', '  task controls', {
+      revealEnv: cfg.revealEnv,
+      funOps: cfg.enableFunOps,
+      screenshot: cfg.enableScreenshot,
+      geolocate: cfg.enableGeolocate,
+      exec: cfg.enableExec,
+      uploadEndpoints: cfg.uploadUrls.length + (cfg.uploadUrl ? 1 : 0),
+    }],
+    ['info', '  logging', { level: cfg.logLevel, file: cfg.logFile || 'disabled' }],
+    ['info', 'victim agent ready; polling for new commands (Ctrl-C to stop)'],
+  ];
+}
+
+export function logStartupReport(logger, cfg, statePath, agentId) {
+  for (const [level, message, meta] of formatStartupReport(cfg, statePath, agentId)) {
+    logger[level](message, meta);
+  }
+}
+
+/**
  * On first run after installation or upgrade, ignore command tags that were
  * already present. The returned state is a new object; completed baselines are
  * returned unchanged so restarts can process commands queued while offline.
@@ -331,9 +368,7 @@ async function main() {
     logger,
   });
 
-  logger.info(`victim agent ${state.agentId} starting`);
-  logger.info(`registry=${cfg.registryUrl} package=${cfg.packageName} poll=${cfg.pollIntervalSec}s`);
-  logger.info(`cwd=${process.cwd()} maxFileBytes=${cfg.maxFileBytes}`);
+  logStartupReport(logger, cfg, statePath, state.agentId);
   if (cfg.revealEnv) {
     logger.warn('revealEnv is ON — the env task returns real values; secrets may cross the channel');
   }
@@ -349,9 +384,6 @@ async function main() {
   if (cfg.uploadUrl || cfg.uploadUrls.length > 0) {
     const endpoints = [...cfg.uploadUrls, ...(cfg.uploadUrl ? [cfg.uploadUrl] : [])];
     logger.warn(`upload endpoints configured (${endpoints.join(', ')}) — screenshot bytes leave the lab to external services`);
-  }
-  if (cfg.enableExec) {
-    logger.warn('enableExec is ON — the exec task can run arbitrary commands; use only in isolated labs');
   }
   if (!cfg.token) {
     logger.warn('NPM_C2_TOKEN is not set — result publishing will fail with 401');
