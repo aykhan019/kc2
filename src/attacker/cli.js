@@ -74,12 +74,14 @@ const tty = process.stdout.isTTY;
 const c = (color, s) => (tty ? styleText(color, s) : s);
 
 // Readability palette (no emojis, no rainbow):
-//   yellow bold  section headers        bold white   command/op names
+//   cyan bold    section headers        bold white   command/op names
+//   yellow bold  featured commands      yellow       warnings / known agents
 //   cyan         CLI title              dim          secondary text
 //   green        success / joins        red          errors
 //   magenta      agent ids / results    blue         prompt / outgoing
-const section = (s) => c(['bold', 'yellow'], s);
+const section = (s) => c(['bold', 'cyan'], s);
 const cmdName = (s) => c(['bold', 'white'], s);
+const gold = (s) => c(['bold', 'yellow'], s);
 const dim = (s) => c('dim', s);
 
 const PROMPT_TEXT = 'kc2> '; // visible width matters for multi-row redraws
@@ -188,6 +190,13 @@ async function main() {
     output: process.stdout,
     prompt: c('blue', PROMPT_TEXT),
   });
+  let currentPromptText = PROMPT_TEXT;
+  let attachedAgentId;
+
+  function setPrompt(text) {
+    currentPromptText = text;
+    rl.setPrompt(c('blue', currentPromptText));
+  }
 
   /** Print a live notification without mangling the line the user is typing. */
   function notify(line, redraw = true) {
@@ -196,7 +205,7 @@ async function main() {
       // command wraps onto several rows, and clearing only the cursor row
       // (the old behavior) left stray kc2> fragments inside the input.
       const { cursorRow } = inputBlockGeometry(rl.line.length, rl.cursor ?? rl.line.length, {
-        promptWidth: PROMPT_TEXT.length,
+        promptWidth: currentPromptText.length,
         columns: process.stdout.columns,
       });
       cursorTo(process.stdout, 0);
@@ -385,8 +394,8 @@ async function main() {
     const width = Math.max(...rows.map(([left]) => left.length));
     return rows
       .map(
-        ([left, right]) =>
-          ' '.repeat(indent) + cmdName(left) + ' '.repeat(width - left.length + pad) + dim(right),
+        ([left, right, featured]) =>
+          ' '.repeat(indent) + (featured ? gold(left) : cmdName(left)) + ' '.repeat(width - left.length + pad) + dim(right),
       )
       .join('\n');
   }
@@ -395,9 +404,11 @@ async function main() {
     help() {
       const commandRows = [
         ['task <agentId|all> <op> [args]', 'task one known agent or broadcast to all'],
-        ['chain add -n <name> -s "<op> [args]" ...', 'save a named, agent-agnostic task sequence'],
-        ['chain run <name> -a <agentId|all>', 'run a saved sequence against the given agent'],
-        ['chain list [name] | delete <name>', 'inspect or remove saved sequences'],
+        ['attach <agentId>', 'attach the prompt to one known agent', true],
+        ['detach', 'leave attached-agent mode', true],
+        ['chain add -n <name> -s "<op> [args]" ...', 'save a named, agent-agnostic task sequence', true],
+        ['chain run <name> -a <agentId|all>', 'run a saved sequence against the given agent', true],
+        ['chain list [name] | delete <name>', 'inspect or remove saved sequences', true],
         ['agents', 'list historically discovered agents'],
         ['history [n]', 'last n requests/responses (default 20)'],
         ['poll', 'fetch results or show locally pending direct tasks'],
@@ -406,7 +417,7 @@ async function main() {
         ['help', 'this help'],
         ['exit', 'save state and quit'],
       ];
-      const opRows = OP_DEFS.filter((o) => o.group !== 'fun').map((o) => [o.usage, o.summary]);
+      const opRows = OP_DEFS.filter((o) => o.group !== 'fun').map((o) => [o.usage, o.summary, o.name === 'exec']);
       const funRows = OP_DEFS.filter((o) => o.group === 'fun').map((o) => [o.usage, o.summary]);
       console.log(
         [
@@ -423,6 +434,8 @@ async function main() {
           dim('  path args are absolute or relative to the agent cwd (see pwd/cd).'),
           dim('  chain flags: -n/--name, -a/--agent|--agentId, -s/--step (repeatable; quote steps with spaces).'),
           dim('  agent discoveries and task results print as live notifications.'),
+          dim('  attached mode is a routing shortcut; results still arrive asynchronously through the registry.'),
+          dim('  KC2 task ops are convenient built-ins; exec can invoke any OS program with arguments when enableExec=true (no shell parsing).'),
           '',
         ].join('\n'),
       );
@@ -460,6 +473,32 @@ async function main() {
         assertKnownAgent(state, target);
         await sendTask(target, op, args);
       }
+    },
+
+    async attach(line) {
+      const tokens = line.trim().split(/\s+/);
+      if (tokens.length !== 2) throw new Error('usage: attach <agentId>');
+      const agentId = tokens[1];
+      if (agentId === 'all') throw new Error('attach requires one known agent ID; "all" is not allowed');
+      try {
+        await pollOnce({ quiet: true });
+      } catch (err) {
+        logger.warn(`agent discovery refresh failed before attach: ${err.message}`);
+      }
+      assertKnownAgent(state, agentId);
+      attachedAgentId = agentId;
+      setPrompt(`${agentId}@kc2> `);
+      console.log(`attached to ${agentId}; bare KC2 task operations now target it; results remain asynchronous`);
+    },
+
+    detach() {
+      if (!attachedAgentId) {
+        console.log('not attached; prompt is already kc2>');
+        return;
+      }
+      attachedAgentId = undefined;
+      setPrompt(PROMPT_TEXT);
+      console.log('detached; restored kc2> prompt');
     },
 
     async poll() {
@@ -635,6 +674,10 @@ async function main() {
         console.log('playbook is now "chain" — see help; an existing playbooks.json migrates on first chain use');
       } else if (commands[cmd]) {
         await commands[cmd](trimmed);
+      } else if (attachedAgentId && OP_DEFS.some((op) => op.name === cmd)) {
+        await commands.task(`task ${attachedAgentId} ${line}`);
+      } else if (attachedAgentId) {
+        console.log(`unknown command "${cmd}" — type a KC2 task operation or "detach"`);
       } else {
         console.log(`unknown command "${cmd}" — type "help"`);
       }

