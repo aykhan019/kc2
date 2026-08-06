@@ -266,11 +266,9 @@ test('CLI chain: flag-based add, run against a given agent, legacy migration', a
 
   assert.equal(result.code, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /migrated playbooks\.json -> chains\.json/);
-  assert.match(result.stdout, /# Legacy chain \(add a description\)/);
-  assert.match(result.stdout, /warmup\s+1 step\(s\)/);
-  assert.match(result.stdout, /# Quick liveness check/);
+  assert.match(result.stdout, /warmup\s+# Legacy chain \(add a description\) • 1 step\(s\)/);
+  assert.match(result.stdout, /recon\s+# Quick liveness check • 3 step\(s\)/);
   assert.match(result.stdout, /added chain recon \(3 step\(s\)/);
-  assert.match(result.stdout, /recon\s+3 step\(s\)/);
   assert.match(result.stdout, /1\. ping/);
   assert.match(result.stdout, /running chain "recon" against agent1 \(3 steps\)/);
   assert.match(result.stdout, /sent: task #1 ping -> agent1/);

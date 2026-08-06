@@ -613,7 +613,8 @@ async function main() {
         }
         for (const n of names) {
           const entry = map[n];
-          console.log(`${dim(`# ${entry.description}`)}\n  ${cmdName(n)}  ${dim(`${entry.steps.length} step(s)`)}`);
+          const gap = ' '.repeat(Math.max(1, 22 - n.length));
+          console.log(`${cmdName(n)}${gap}${dim(`# ${entry.description} • ${entry.steps.length} step(s)`)}`);
         }
         return;
       }
