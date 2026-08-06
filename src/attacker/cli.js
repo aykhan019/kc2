@@ -431,7 +431,7 @@ async function main() {
         ['task <agentId|all> <op> [args]', 'task one known agent or broadcast to all'],
         ['playbook add <name> <cmd> then <cmd> ...', 'save a named command sequence'],
         ['playbook run <name>', 'run a saved sequence step by step'],
-        ['playbook list|show|delete', 'inspect or remove saved sequences'],
+        ['playbook list [name] | delete <name>', 'inspect or remove saved sequences'],
         ['agents', 'list historically discovered agents'],
         ['history [n]', 'last n requests/responses (default 20)'],
         ['poll', 'fetch results or show locally pending direct tasks'],
@@ -549,6 +549,14 @@ async function main() {
       const map = loadPlaybooks(file);
 
       if (sub === 'list') {
+        // `list <name>` shows one playbook's steps; bare `list` the overview.
+        if (name) {
+          const steps = map[name];
+          if (!steps) throw new Error(`unknown playbook "${name}" — see: playbook list`);
+          console.log(section(`playbook "${name}" (${steps.length} steps):`));
+          steps.forEach((s, i) => console.log(`  ${dim(`${i + 1}.`)} ${s}`));
+          return;
+        }
         const names = Object.keys(map);
         if (names.length === 0) {
           console.log(dim('no playbooks — add one with: playbook add <name> <cmd> then <cmd> ...'));
@@ -558,14 +566,6 @@ async function main() {
         for (const n of names) {
           console.log(`  ${cmdName(n)}  ${dim(`${map[n].length} step(s)`)}`);
         }
-        return;
-      }
-
-      if (sub === 'show') {
-        const steps = map[name];
-        if (!steps) throw new Error(`unknown playbook "${name ?? ''}" — see: playbook list`);
-        console.log(section(`playbook "${name}" (${steps.length} steps):`));
-        steps.forEach((s, i) => console.log(`  ${dim(`${i + 1}.`)} ${s}`));
         return;
       }
 
@@ -607,7 +607,7 @@ async function main() {
         return;
       }
 
-      console.log('usage: playbook list | show <name> | add <name> <cmd> then <cmd> ... | delete <name> | run <name>');
+      console.log('usage: playbook list [name] | add <name> <cmd> then <cmd> ... | delete <name> | run <name>');
     },
 
     stats() {

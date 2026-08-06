@@ -1,0 +1,7 @@
+{
+  "recon": [
+    "task agent1 cd ..",
+    "task agent1 ls",
+    "task agent1 exec pwd"
+  ]
+}

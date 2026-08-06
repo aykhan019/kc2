@@ -241,7 +241,7 @@ test('CLI playbook: add from the prompt, then run the saved sequence in order', 
     [
       'playbook add recon task agent1 ping then task agent1 time',
       'playbook list',
-      'playbook show recon',
+      'playbook list recon',
       'playbook run recon',
       'playbook delete recon',
       'exit',
