@@ -49,8 +49,10 @@ test('parseChainFlags parses short/long flags, = form, and positionals', () => {
     '--step',
     'ls',
     '--name=demo',
+    '--description=Quick host survey',
   ]);
   assert.equal(flags.name, 'demo');
+  assert.equal(flags.description, 'Quick host survey');
   assert.equal(flags.agent, 'agent1');
   assert.deepEqual(flags.steps, ['cd ..', 'ls']);
   assert.deepEqual(positional, ['recon']);
@@ -69,19 +71,20 @@ test('parseChainFlags rejects unknown flags and missing values', () => {
   assert.throws(() => parseChainFlags(['-s']), /needs a value/);
 });
 
-test('setChain adds and replaces with validated names and steps', () => {
+test('setChain adds and replaces immutable described chains', () => {
   let map = {};
-  map = setChain(map, 'recon', ['pwd', 'ls']);
-  assert.deepEqual(map.recon, ['pwd', 'ls']);
-  map = setChain(map, 'recon', ['whoami']);
-  assert.deepEqual(map.recon, ['whoami']);
+  map = setChain(map, 'recon', 'Quick directory survey', ['pwd', 'ls']);
+  assert.deepEqual(map.recon, { description: 'Quick directory survey', steps: ['pwd', 'ls'] });
+  map = setChain(map, 'recon', 'Identity check', ['whoami']);
+  assert.deepEqual(map.recon, { description: 'Identity check', steps: ['whoami'] });
 
-  assert.throws(() => setChain(map, 'bad name!', ['pwd']), /invalid chain name/);
-  assert.throws(() => setChain(map, '', ['pwd']), /invalid chain name/);
-  assert.throws(() => setChain(map, 'x', []), /at least one step/);
-  assert.throws(() => setChain(map, 'x', ['   ']), /non-empty/);
-  assert.throws(() => setChain(map, 'x', ['y'.repeat(MAX_STEP_LEN + 1)]), /exceeds/);
-  assert.throws(() => setChain(map, 'x', Array(MAX_STEPS + 1).fill('pwd')), /at most/);
+  assert.throws(() => setChain(map, 'bad name!', 'Description', ['pwd']), /invalid chain name/);
+  assert.throws(() => setChain(map, '', 'Description', ['pwd']), /invalid chain name/);
+  assert.throws(() => setChain(map, 'x', '', ['pwd']), /description/);
+  assert.throws(() => setChain(map, 'x', 'Description', []), /at least one step/);
+  assert.throws(() => setChain(map, 'x', 'Description', ['   ']), /non-empty/);
+  assert.throws(() => setChain(map, 'x', 'Description', ['y'.repeat(MAX_STEP_LEN + 1)]), /exceeds/);
+  assert.throws(() => setChain(map, 'x', 'Description', Array(MAX_STEPS + 1).fill('pwd')), /at most/);
 });
 
 test('assertValidSteps enforces bare task ops with valid arguments', () => {
@@ -96,10 +99,13 @@ test('assertValidSteps enforces bare task ops with valid arguments', () => {
 });
 
 test('deleteChain removes existing and rejects unknown names', () => {
-  const map = { recon: ['pwd'], demo: ['ping'] };
+  const map = {
+    recon: { description: 'Current directory', steps: ['pwd'] },
+    demo: { description: 'Connectivity', steps: ['ping'] },
+  };
   const next = deleteChain(map, 'recon');
   assert.deepEqual(Object.keys(next), ['demo']);
-  assert.deepEqual(map.recon, ['pwd']); // original untouched
+  assert.deepEqual(map.recon, { description: 'Current directory', steps: ['pwd'] }); // original untouched
   assert.throws(() => deleteChain(map, 'nope'), /unknown chain/);
 });
 
@@ -109,7 +115,10 @@ test('loadChains returns empty for a missing file', () => {
 
 test('save/load round-trips chains and writes an owner-only file', () => {
   const file = tmpFile();
-  const map = { recon: ['cd ..', 'ls'], check: ['exec pwd'] };
+  const map = {
+    recon: { description: 'Directory survey', steps: ['cd ..', 'ls'] },
+    check: { description: 'Working directory check', steps: ['exec pwd'] },
+  };
   saveChains(file, map);
   assert.deepEqual(loadChains(file), map);
   if (process.platform !== 'win32') {
@@ -136,8 +145,14 @@ test('loadChains rejects structurally invalid files', () => {
   assert.throws(() => loadChains(file), /invalid/);
 });
 
-test('validateChains normalizes step whitespace', () => {
-  assert.deepEqual(validateChains({ recon: ['  pwd  '] }), { recon: ['pwd'] });
+test('validateChains normalizes step whitespace and accepts legacy arrays', () => {
+  assert.deepEqual(validateChains({ recon: { description: 'Directory check', steps: ['  pwd  '] } }), {
+    recon: { description: 'Directory check', steps: ['pwd'] },
+  });
+  assert.deepEqual(validateChains({ legacy: ['pwd'] }), {
+    legacy: { description: 'Legacy chain (add a description)', steps: ['pwd'] },
+  });
+  assert.throws(() => validateChains({ recon: { description: '', steps: ['pwd'] } }), /description/);
   assert.throws(() => validateChains(null), /JSON object/);
   assert.throws(() => validateChains({ a: [1] }), /non-empty/);
 });
@@ -157,7 +172,9 @@ test('migrateLegacyPlaybooks converts the store and keeps a .bak', () => {
   fs.writeFileSync(legacy, JSON.stringify({ recon: ['task a1 cd ..', 'task a1 ls', 'task a1 exec pwd'] }));
 
   assert.equal(migrateLegacyPlaybooks(file), legacy);
-  assert.deepEqual(loadChains(file), { recon: ['cd ..', 'ls', 'exec pwd'] });
+  assert.deepEqual(loadChains(file), {
+    recon: { description: 'Legacy chain (add a description)', steps: ['cd ..', 'ls', 'exec pwd'] },
+  });
   assert.ok(!fs.existsSync(legacy), 'legacy file renamed away');
   assert.ok(fs.existsSync(`${legacy}.bak`), 'legacy kept as .bak');
 

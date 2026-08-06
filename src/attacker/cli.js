@@ -435,7 +435,7 @@ async function main() {
         ['attach <agentId>', 'attach the prompt to one known agent', true],
         ['detach', 'leave attached-agent mode', true],
         ['rename <agentId> <name>', 'assign a durable local display name', true],
-        ['chain add -n <name> -s "<op> [args]" ...', 'save a named, agent-agnostic task sequence', true],
+        ['chain add -n <name> -d <description> -s "<op> [args]" ...', 'save a named, agent-agnostic task sequence', true],
         ['chain run <name> -a <agentId|all>', 'run a saved sequence against the given agent', true],
         ['chain list [name] | delete <name>', 'inspect or remove saved sequences', true],
         ['agents', 'list historically discovered agents'],
@@ -576,7 +576,7 @@ async function main() {
     async chain(line) {
       const file = path.join(path.dirname(statePath), 'chains.json');
       const usage =
-        'usage: chain list [name] | add -n <name> -s "<op> [args]" ... | delete <name> | run <name> -a <agentId|all>';
+        'usage: chain list [name] | add -n <name> -d <description> -s "<op> [args]" ... | delete <name> | run <name> -a <agentId|all>';
       const tokens = tokenize(line);
       const sub = tokens[1] ?? 'list';
       const { flags, positional } = parseChainFlags(tokens.slice(2));
@@ -598,20 +598,22 @@ async function main() {
       if (sub === 'list') {
         // `list <name>` shows one chain's steps; bare `list` the overview.
         if (name) {
-          const steps = map[name];
-          if (!steps) throw new Error(`unknown chain "${name}" — see: chain list`);
-          console.log(section(`chain "${name}" (${steps.length} steps):`));
-          steps.forEach((s, i) => console.log(`  ${dim(`${i + 1}.`)} ${s}`));
+          const entry = map[name];
+          if (!entry) throw new Error(`unknown chain "${name}" — see: chain list`);
+          console.log(dim(`# ${entry.description}`));
+          console.log(section(`chain "${name}" (${entry.steps.length} steps):`));
+          entry.steps.forEach((s, i) => console.log(`  ${dim(`${i + 1}.`)} ${s}`));
           return;
         }
         const names = Object.keys(map);
         if (names.length === 0) {
-          console.log(dim('no chains — add one with: chain add -n <name> -s "<op> [args]" -s "<op> [args]" ...'));
+          console.log(dim('no chains — add one with: chain add -n <name> -d <description> -s "<op> [args]" -s "<op> [args]" ...'));
           console.log(dim(`(stored in ${file}, also editable by hand as JSON)`));
           return;
         }
         for (const n of names) {
-          console.log(`  ${cmdName(n)}  ${dim(`${map[n].length} step(s)`)}`);
+          const entry = map[n];
+          console.log(`${dim(`# ${entry.description}`)}\n  ${cmdName(n)}  ${dim(`${entry.steps.length} step(s)`)}`);
         }
         return;
       }
@@ -621,7 +623,7 @@ async function main() {
         if (flags.agent) {
           throw new Error('chains are agent-agnostic — pass the target at run time: chain run <name> -a <agentId|all>');
         }
-        const next = setChain(map, name, flags.steps);
+        const next = setChain(map, name, flags.description, flags.steps);
         saveChains(file, next);
         console.log(
           `${Object.hasOwn(map, name) ? 'replaced' : 'added'} chain ${cmdName(name)} ` +
@@ -637,12 +639,13 @@ async function main() {
       }
 
       if (sub === 'run') {
-        const steps = map[name ?? ''];
-        if (!steps) throw new Error(`unknown chain "${name ?? ''}" — see: chain list`);
+        const entry = map[name ?? ''];
+        if (!entry) throw new Error(`unknown chain "${name ?? ''}" — see: chain list`);
         if (!flags.agent) throw new Error(`chain run needs a target agent: chain run ${name} -a <agentId|all>`);
-        console.log(section(`running chain "${name}" against ${flags.agent} (${steps.length} steps)`));
-        for (const [i, step] of steps.entries()) {
-          console.log(dim(`[${i + 1}/${steps.length}] ${step}`));
+        console.log(dim(`# ${entry.description}`));
+        console.log(section(`running chain "${name}" against ${flags.agent} (${entry.steps.length} steps)`));
+        for (const [i, step] of entry.steps.entries()) {
+          console.log(dim(`[${i + 1}/${entry.steps.length}] ${step}`));
           const [op, ...rawArgs] = tokenize(step);
           // Steps are validated on creation, then sent as structured requests
           // so quoted arguments keep their boundaries at run time.

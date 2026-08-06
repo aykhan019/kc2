@@ -1,14 +1,17 @@
 // Named task chains for the attacker CLI: reusable sequences of task ops
-// stored as one human-editable JSON object, name -> [steps]:
+// stored as one human-editable JSON object, name -> { description, steps }:
 //
 //   {
-//     "recon": ["cd ..", "ls", "exec pwd"]
+//     "recon": {
+//       "description": "Quick directory survey",
+//       "steps": ["cd ..", "ls", "exec pwd"]
+//     }
 //   }
 //
 // A step is one task op line (op + args, no target — see src/common/ops.js).
 // Chains are agent-agnostic: the target agent is chosen at run time.
 //
-//   chain add -n recon -s "cd .." -s "ls" -s "exec pwd"
+//   chain add -n recon -d "Quick directory survey" -s "cd .." -s "ls" -s "exec pwd"
 //   chain run recon -a agent1
 //
 // The file is validated on every load (fail loud, never silently truncate)
@@ -23,6 +26,7 @@ export const CHAIN_NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
 export const MAX_CHAINS = 50;
 export const MAX_STEPS = 100;
 export const MAX_STEP_LEN = 4096; // chars of one step string (op + args)
+export const MAX_DESCRIPTION_LEN = 160;
 export const CHAIN_FILE_MAX_BYTES = 256 * 1024;
 export const CHAINS_FILE = 'chains.json';
 export const LEGACY_PLAYBOOKS_FILE = 'playbooks.json';
@@ -30,7 +34,8 @@ const LEGACY_STEP_RE = /^task\s+\S+\s+(.+)$/s;
 
 /**
  * Split a command line into tokens, honoring single and double quotes:
- *   chain add -n recon -s "exec pwd"  ->  ['chain','add','-n','recon','-s','exec pwd']
+ *   chain add -n recon -d "Working directory" -s "exec pwd"
+ *     -> ['chain','add','-n','recon','-d','Working directory','-s','exec pwd']
  * Throws on an unterminated quote instead of guessing.
  */
 export function tokenize(line) {
@@ -51,6 +56,7 @@ export function tokenize(line) {
  * Parse chain subcommand flags. Supported:
  *   -n, --name <name>              chain name
  *   -a, --agent, --agentId <id>    target agent id (or "all") for `run`
+ *   -d, --description <text>        short explanation for `add`
  *   -s, --step "<op> [args]"       one step; repeatable, order preserved
  * Long flags also accept the --flag=value form. Anything else that does not
  * start with "-" is returned as positional (e.g. the name in `chain run X`).
@@ -83,6 +89,10 @@ export function parseChainFlags(tokens) {
       case '--agent-id':
         flags.agent = value();
         break;
+      case '-d':
+      case '--description':
+        flags.description = value();
+        break;
       case '-s':
       case '--step':
         flags.steps.push(value());
@@ -98,6 +108,15 @@ export function parseChainFlags(tokens) {
 export function assertValidName(name) {
   if (!CHAIN_NAME_RE.test(String(name ?? ''))) {
     throw new Error(`invalid chain name "${name}" — use 1-32 of A-Z a-z 0-9 _ -`);
+  }
+}
+
+export function assertValidDescription(description) {
+  if (typeof description !== 'string' || description.trim() === '') {
+    throw new Error('a chain needs a non-empty description');
+  }
+  if (description.trim().length > MAX_DESCRIPTION_LEN) {
+    throw new Error(`chain description exceeds ${MAX_DESCRIPTION_LEN} characters`);
   }
 }
 
@@ -146,10 +165,19 @@ export function validateChains(raw) {
     throw new Error(`chain file holds at most ${MAX_CHAINS} chains`);
   }
   const out = {};
-  for (const [name, steps] of entries) {
+  for (const [name, value] of entries) {
     assertValidName(name);
+    // Array entries are the pre-description schema. Preserve them as readable
+    // chains while normalizing in-memory; the next save upgrades the file.
+    const legacy = Array.isArray(value);
+    const description = legacy ? 'Legacy chain (add a description)' : value?.description;
+    const steps = legacy ? value : value?.steps;
+    assertValidDescription(description);
     assertValidSteps(steps);
-    out[name] = steps.map((s) => s.trim());
+    out[name] = {
+      description: description.trim(),
+      steps: steps.map((s) => s.trim()),
+    };
   }
   return out;
 }
@@ -181,13 +209,20 @@ export function saveChains(file, chains) {
 }
 
 /** Return a new map with the chain added (or replaced), caps enforced. */
-export function setChain(map, name, steps) {
+export function setChain(map, name, description, steps) {
   assertValidName(name);
+  assertValidDescription(description);
   assertValidSteps(steps);
   if (!Object.hasOwn(map, name) && Object.keys(map).length >= MAX_CHAINS) {
     throw new Error(`chain limit reached (${MAX_CHAINS}) — delete one first`);
   }
-  return { ...map, [name]: steps.map((s) => s.trim()) };
+  return {
+    ...map,
+    [name]: {
+      description: description.trim(),
+      steps: steps.map((s) => s.trim()),
+    },
+  };
 }
 
 /** Return a new map without the named chain; throws if it does not exist. */
@@ -234,7 +269,10 @@ export function migrateLegacyPlaybooks(file, legacyFile = path.join(path.dirname
     if (!Array.isArray(steps)) {
       throw new Error(`legacy playbook "${name}" is not a list of steps — fix or delete ${legacyFile}`);
     }
-    migrated[name] = steps.map(migrateLegacyStep);
+    migrated[name] = {
+      description: 'Legacy chain (add a description)',
+      steps: steps.map(migrateLegacyStep),
+    };
   }
   try {
     saveChains(file, migrated);

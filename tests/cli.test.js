@@ -253,7 +253,7 @@ test('CLI chain: flag-based add, run against a given agent, legacy migration', a
     ['src/attacker/cli.js', '--config', configFile],
     [
       'chain list',
-      "chain add -n recon -s \"ping\" -s \"time\" -s 'exec printf \"hello world\"'",
+      "chain add -n recon -d \"Quick liveness check\" -s \"ping\" -s \"time\" -s 'exec printf \"hello world\"'",
       'chain list',
       'chain list recon',
       'chain run recon -a agent1',
@@ -266,7 +266,9 @@ test('CLI chain: flag-based add, run against a given agent, legacy migration', a
 
   assert.equal(result.code, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /migrated playbooks\.json -> chains\.json/);
+  assert.match(result.stdout, /# Legacy chain \(add a description\)/);
   assert.match(result.stdout, /warmup\s+1 step\(s\)/);
+  assert.match(result.stdout, /# Quick liveness check/);
   assert.match(result.stdout, /added chain recon \(3 step\(s\)/);
   assert.match(result.stdout, /recon\s+3 step\(s\)/);
   assert.match(result.stdout, /1\. ping/);
@@ -281,7 +283,9 @@ test('CLI chain: flag-based add, run against a given agent, legacy migration', a
     [agentId, 3, 'exec', { cmd: 'printf', args: ['hello world'] }],
   ]);
   // delete leaves the migrated chain behind in a valid store
-  assert.deepEqual(JSON.parse(fs.readFileSync(chainFile, 'utf8')), { warmup: ['ping'] });
+  assert.deepEqual(JSON.parse(fs.readFileSync(chainFile, 'utf8')), {
+    warmup: { description: 'Legacy chain (add a description)', steps: ['ping'] },
+  });
   assert.ok(fs.existsSync(`${legacyFile}.bak`), 'legacy playbook file kept as .bak');
 });
 

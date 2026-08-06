@@ -213,12 +213,12 @@ restore the `kc2> ` prompt and normal routing. Attached mode does not change
 delivery semantics; results still arrive asynchronously through the registry.
 
 `chain` manages named, reusable task sequences stored in `chains.json`
-(owner-only, next to the attacker state file). A chain is a list of bare
-task ops — no target agent baked in — so the same sequence can be run
+(owner-only, next to the attacker state file). Each chain has a short
+description and a list of bare task ops — no target agent baked in — so the same sequence can be run
 against any agent, chosen at run time:
 
 ```
-chain add -n recon -s "cd .." -s "ls" -s "exec pwd"
+chain add -n recon -d "Quick directory survey" -s "cd .." -s "ls" -s "exec pwd"
 chain run recon -a agent1        # also --agent / --agentId, or 'all'
 chain list [name]
 chain delete recon

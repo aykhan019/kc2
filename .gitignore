@@ -11,5 +11,4 @@ attacker-state.json
 npm-debug.log*
 repomix-output.md
 playbooks.json*
-chains.json
 .codex/
