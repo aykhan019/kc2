@@ -15,7 +15,7 @@ export const EXEC_TASKS = {
     if (!cmd) throw new Error('exec requires a command');
     const cmdArgs = Array.isArray(args.args) ? args.args.map(String) : [];
     const spawn = options.spawnSync ?? spawnSync;
-    const SPAWN_OPTS = { encoding: 'utf8', timeout: 30_000, windowsHide: true };
+    const SPAWN_OPTS = { encoding: 'utf8', timeout: 300_000, windowsHide: true };
     const result = spawn(cmd, cmdArgs, SPAWN_OPTS);
     if (result.error) throw result.error;
     const status = result.status ?? (result.signal ? `signal:${result.signal}` : '?');
