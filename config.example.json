@@ -21,5 +21,6 @@
   "logLevel": "info",
   "requestTimeoutMs": 10000,
   "maxRetries": 3,
-  "retryBaseDelayMs": 500
+  "retryBaseDelayMs": 500,
+  "enableExec": true
 }

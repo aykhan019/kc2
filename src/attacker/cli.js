@@ -92,11 +92,23 @@ export function sanitizeRegistryText(value, maxLength = REGISTRY_TEXT_MAX) {
   return text
     .replace(ANSI_CSI_RE, '')
     .replace(TERMINAL_CONTROL_RE, (character) => {
-      if (character === '\n') return '\\n';
+      // Newlines are safe once escape sequences are gone: keep them so
+      // multi-line task output stays readable in the CLI.
+      if (character === '\n') return '\n';
       if (character === '\t') return '\\t';
       return '';
     })
     .slice(0, maxLength);
+}
+
+/**
+ * Format a result body for display: inline after the header when it is a
+ * single line, otherwise as an indented block on the following lines.
+ */
+function formatResultBody(body) {
+  if (!body.includes('\n')) return ` ${body}`;
+  const lines = body.split('\n').map((line) => `  ${line}`);
+  return `\n${lines.join('\n')}`;
 }
 
 /** Coalesce concurrent refresh callers onto the same in-flight promise. */
@@ -237,7 +249,7 @@ function formatHistoryEntry(e) {
   const status = e.ok ? c('green', 'ok') : c('red', 'FAIL');
   const body = sanitizeRegistryText(e.ok ? e.output : e.error, HISTORY_OUTPUT_MAX);
   const op = sanitizeRegistryText(e.op ?? '?', 64);
-  return `[${at}] ${c('magenta', '<-')} ${e.agentId} #${e.seq} ${op} ${status}: ${body}`;
+  return `[${at}] ${c('magenta', '<-')} ${e.agentId} #${e.seq} ${op} ${status}:${formatResultBody(body)}`;
 }
 
 async function main() {
@@ -298,19 +310,19 @@ async function main() {
     const error = sanitizeRegistryText(r.error);
     const head = `[${ts()}] ${c('magenta', agentId)} #${r.seq} ${op}`;
     if (!r.ok) {
-      notify(`${head} ${c('red', 'FAILED')}: ${error}`, redraw);
+      notify(`${head} ${c('red', 'FAILED')}:${formatResultBody(error)}`, redraw);
       return;
     }
     if (r.file && typeof r.file.dataB64 === 'string') {
       try {
         const out = saveDownload(agentId, r, cfg.downloadDir);
-        notify(`${head} ${c('green', 'done')}: ${output} -> saved to ${c('bold', out)}`, redraw);
+        notify(`${head} ${c('green', 'done')}:${formatResultBody(output)} -> saved to ${c('bold', out)}`, redraw);
       } catch (err) {
         notify(`${head} ${c('red', 'error')}: received file but failed to save: ${err.message}`, redraw);
       }
       return;
     }
-    notify(`${head} ${c('green', 'done')}: ${output}`, redraw);
+    notify(`${head} ${c('green', 'done')}:${formatResultBody(output)}`, redraw);
   }
 
   function recordResult(agentId, r) {

@@ -20,7 +20,7 @@ test('allowlist contains exactly the documented ops', () => {
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
     [
-      'beep', 'bounce', 'cd', 'df', 'echo', 'env', 'find', 'geolocate', 'getfile', 'hash', 'ls',
+      'beep', 'bounce', 'cd', 'df', 'echo', 'env', 'exec', 'find', 'geolocate', 'getfile', 'hash', 'ls',
       'netinfo', 'notify', 'openurl', 'party', 'ping', 'ps', 'pwd', 'rickroll',
       'say', 'screenshot', 'stat', 'sysinfo', 'time', 'volume', 'whoami',
     ],

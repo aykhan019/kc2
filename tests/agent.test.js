@@ -479,7 +479,8 @@ test('pending direct tasks are derived from local request/response history', () 
 });
 
 test('registry result text cannot inject terminal controls or unbounded output', () => {
-  assert.equal(sanitizeRegistryText('\u001b[31mFAIL\nnext\tline'), 'FAIL\\nnext\\tline');
+  assert.equal(sanitizeRegistryText('\u001b[31mFAIL\nnext\tline'), 'FAIL\nnext\\tline');
+  assert.equal(sanitizeRegistryText('a\rb\rc'), 'abc');
   assert.equal(sanitizeRegistryText('x'.repeat(5_000)).length, 4_000);
 });
 
