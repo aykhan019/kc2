@@ -186,7 +186,7 @@ test('CLI polling preserves locally sent commands beyond the legacy task TTL', a
   assert.equal(tags[command], '1.0.0');
 });
 
-test('CLI playbook: add from the prompt, then run the saved sequence in order', async (t) => {
+test('CLI chain: flag-based add, run against a given agent, legacy migration', async (t) => {
   const agentId = 'agent1';
   const announce = encodeAnnounceTag(agentId, {
     ts: 9_999_999_999_999,
@@ -218,8 +218,11 @@ test('CLI playbook: add from the prompt, then run the saved sequence in order', 
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-cli-'));
   const stateFile = path.join(tmp, 'attacker-state.json');
-  const playbookFile = path.join(tmp, 'playbooks.json');
+  const chainFile = path.join(tmp, 'chains.json');
+  const legacyFile = path.join(tmp, 'playbooks.json');
   const configFile = path.join(tmp, 'config.json');
+  // legacy store from the playbook era: migrates on first chain use
+  fs.writeFileSync(legacyFile, JSON.stringify({ warmup: [`task ${agentId} ping`] }));
   fs.writeFileSync(configFile, JSON.stringify({
     registryUrl: `http://127.0.0.1:${server.address().port}`,
     packageName: 'lab-package',
@@ -239,11 +242,12 @@ test('CLI playbook: add from the prompt, then run the saved sequence in order', 
   const result = await runCli(
     ['src/attacker/cli.js', '--config', configFile],
     [
-      'playbook add recon task agent1 ping then task agent1 time',
-      'playbook list',
-      'playbook list recon',
-      'playbook run recon',
-      'playbook delete recon',
+      'chain list',
+      'chain add -n recon -s "ping" -s "time"',
+      'chain list',
+      'chain list recon',
+      'chain run recon -a agent1',
+      'chain delete recon',
       'exit',
       '',
     ].join('\n'),
@@ -251,17 +255,20 @@ test('CLI playbook: add from the prompt, then run the saved sequence in order', 
   );
 
   assert.equal(result.code, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /added playbook recon \(2 step\(s\)/);
+  assert.match(result.stdout, /migrated playbooks\.json -> chains\.json/);
+  assert.match(result.stdout, /warmup\s+1 step\(s\)/);
+  assert.match(result.stdout, /added chain recon \(2 step\(s\)/);
   assert.match(result.stdout, /recon\s+2 step\(s\)/);
-  assert.match(result.stdout, /1\. task agent1 ping/);
-  assert.match(result.stdout, /running playbook "recon" \(2 steps\)/);
+  assert.match(result.stdout, /1\. ping/);
+  assert.match(result.stdout, /running chain "recon" against agent1 \(2 steps\)/);
   assert.match(result.stdout, /sent: task #1 ping -> agent1/);
   assert.match(result.stdout, /sent: task #2 time -> agent1/);
-  assert.match(result.stdout, /deleted playbook recon/);
+  assert.match(result.stdout, /deleted chain recon/);
   assert.deepEqual(commandWrites.map(({ agentId: target, seq, payload }) => [target, seq, payload.op]), [
     [agentId, 1, 'ping'],
     [agentId, 2, 'time'],
   ]);
-  // delete leaves an empty (but valid) store behind
-  assert.deepEqual(JSON.parse(fs.readFileSync(playbookFile, 'utf8')), {});
+  // delete leaves the migrated chain behind in a valid store
+  assert.deepEqual(JSON.parse(fs.readFileSync(chainFile, 'utf8')), { warmup: ['ping'] });
+  assert.ok(fs.existsSync(`${legacyFile}.bak`), 'legacy playbook file kept as .bak');
 });

@@ -10,4 +10,5 @@ attacker-state.json
 .lab-token
 npm-debug.log*
 repomix-output.md
-playbooks.json
+playbooks.json*
+chains.json

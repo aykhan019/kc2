@@ -52,3 +52,79 @@ export const TASK_OPS = Object.freeze(OP_DEFS.map((o) => o.name));
 export function getOpDef(name) {
   return OP_DEFS.find((o) => o.name === name);
 }
+
+/**
+ * Parse and validate the argument tokens of one op into the args object
+ * sent in the command payload; throws a usage error on any mismatch.
+ * `context` prefixes usage messages with how the op was invoked
+ * (e.g. "task <agentId|all>" at the prompt, "-s" inside chain add).
+ */
+export function parseOpArgs(op, rest, context = 'task <agentId|all>') {
+  const def = getOpDef(op);
+  if (!def) {
+    throw new Error(`unknown op "${op}" — allowed: ${OP_DEFS.map((o) => o.name).join(', ')}`);
+  }
+  const pathHint =
+    '\n  path is absolute (e.g. /etc/hosts) or relative to the agent\'s cwd (see pwd/cd)';
+  const usage = (extra = '') => `usage: ${context} ${def.usage}${extra}`;
+  const args = {};
+  switch (def.argSpec) {
+    case 'none':
+      if (rest.length > 0) throw new Error(`op "${op}" takes no arguments`);
+      break;
+    case 'cmd':
+      args.cmd = rest[0];
+      if (!args.cmd) throw new Error(usage());
+      args.args = rest.slice(1);
+      break;
+    case 'text':
+      args.text = rest.join(' ');
+      break;
+    case 'text!':
+      args.text = rest.join(' ');
+      if (!args.text) throw new Error(usage());
+      break;
+    case 'url': {
+      args.url = rest.join(' ');
+      let parsed;
+      try {
+        parsed = new URL(args.url);
+      } catch {
+        throw new Error(usage(' (http(s):// only)'));
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error('openurl accepts http(s):// URLs only');
+      }
+      break;
+    }
+    case 'volume':
+      args.level = Number(rest[0]);
+      if (rest.length !== 1 || !Number.isInteger(args.level) || args.level < 0 || args.level > 100) {
+        throw new Error(usage());
+      }
+      break;
+    case 'width?':
+      if (rest.length > 0) {
+        args.width = Number(rest[0]);
+        if (rest.length !== 1 || !Number.isInteger(args.width) || args.width < 160 || args.width > 7680) {
+          throw new Error(usage(' (maxwidth 160-7680)'));
+        }
+      }
+      break;
+    case 'path':
+      args.path = rest.join(' ');
+      if (!args.path) throw new Error(usage(pathHint));
+      break;
+    case 'path?':
+      if (rest.length > 0) args.path = rest.join(' ');
+      break;
+    case 'path+query':
+      [args.path] = rest;
+      args.query = rest.slice(1).join(' ');
+      if (!args.path || !args.query) {
+        throw new Error(usage(pathHint));
+      }
+      break;
+  }
+  return args;
+}

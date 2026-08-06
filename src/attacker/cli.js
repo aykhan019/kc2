@@ -9,7 +9,7 @@
 //   agents                      list historically discovered agents
 //   task <agentId|all> <op> [args...]   task one known agent or broadcast to all
 //                         (op allowlist: src/common/ops.js)
-//   playbook list|show|add|delete|run   named command sequences (playbooks.json)
+//   chain list|add|delete|run   named task sequences (chains.json)
 //   history [n]                 show the last n requests/responses (default 20)
 //   poll                        fetch results or show locally pending direct tasks
 //   clean                       delete all lab tags (x-cmd-*/x-res-*/x-ann-*)
@@ -37,7 +37,7 @@ import {
   isResultTag,
   reassembleResult,
 } from '../common/protocol.js';
-import { OP_DEFS, getOpDef } from '../common/ops.js';
+import { OP_DEFS, parseOpArgs } from '../common/ops.js';
 import { RegistryClient } from '../common/registry.js';
 import { saveState } from '../victim/agent.js';
 import { assertKnownAgent, loadAttackerState } from './state.js';
@@ -58,12 +58,14 @@ export {
 } from './text.js';
 import {
   assertValidName,
-  deletePlaybook,
-  loadPlaybooks,
-  parseSteps,
-  savePlaybooks,
-  setPlaybook,
-} from './playbooks.js';
+  deleteChain,
+  loadChains,
+  migrateLegacyPlaybooks,
+  parseChainFlags,
+  saveChains,
+  setChain,
+  tokenize,
+} from './chains.js';
 
 const tty = process.stdout.isTTY;
 const c = (color, s) => (tty ? styleText(color, s) : s);
@@ -99,72 +101,7 @@ function parseTaskLine(line) {
   if (!target || !op) {
     throw new Error('usage: task <agentId|all> <op> [args...]');
   }
-  const def = getOpDef(op);
-  if (!def) {
-    throw new Error(`unknown op "${op}" — allowed: ${OP_DEFS.map((o) => o.name).join(', ')}`);
-  }
-  const pathHint =
-    '\n  path is absolute (e.g. /etc/hosts) or relative to the agent\'s cwd (see pwd/cd)';
-  const args = {};
-  switch (def.argSpec) {
-    case 'none':
-      if (rest.length > 0) throw new Error(`op "${op}" takes no arguments`);
-      break;
-    case 'cmd':
-      args.cmd = rest[0];
-      if (!args.cmd) throw new Error(`usage: task <target> ${def.usage}`);
-      args.args = rest.slice(1);
-      break;
-    case 'text':
-      args.text = rest.join(' ');
-      break;
-    case 'text!':
-      args.text = rest.join(' ');
-      if (!args.text) throw new Error(`usage: task <agentId|all> ${def.usage}`);
-      break;
-    case 'url': {
-      args.url = rest.join(' ');
-      let parsed;
-      try {
-        parsed = new URL(args.url);
-      } catch {
-        throw new Error(`usage: task <agentId|all> ${def.usage} (http(s):// only)`);
-      }
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        throw new Error('openurl accepts http(s):// URLs only');
-      }
-      break;
-    }
-    case 'volume':
-      args.level = Number(rest[0]);
-      if (rest.length !== 1 || !Number.isInteger(args.level) || args.level < 0 || args.level > 100) {
-        throw new Error(`usage: task <agentId|all> ${def.usage}`);
-      }
-      break;
-    case 'width?':
-      if (rest.length > 0) {
-        args.width = Number(rest[0]);
-        if (rest.length !== 1 || !Number.isInteger(args.width) || args.width < 160 || args.width > 7680) {
-          throw new Error(`usage: task <agentId|all> ${def.usage} (maxwidth 160-7680)`);
-        }
-      }
-      break;
-    case 'path':
-      args.path = rest.join(' ');
-      if (!args.path) throw new Error(`usage: task <agentId|all> ${def.usage}${pathHint}`);
-      break;
-    case 'path?':
-      if (rest.length > 0) args.path = rest.join(' ');
-      break;
-    case 'path+query':
-      [args.path] = rest;
-      args.query = rest.slice(1).join(' ');
-      if (!args.path || !args.query) {
-        throw new Error(`usage: task <agentId|all> ${def.usage}${pathHint}`);
-      }
-      break;
-  }
-  return { target, op, args };
+  return { target, op, args: parseOpArgs(op, rest) };
 }
 
 function sanitizeFilename(name) {
@@ -429,9 +366,9 @@ async function main() {
     help() {
       const commandRows = [
         ['task <agentId|all> <op> [args]', 'task one known agent or broadcast to all'],
-        ['playbook add <name> <cmd> then <cmd> ...', 'save a named command sequence'],
-        ['playbook run <name>', 'run a saved sequence step by step'],
-        ['playbook list [name] | delete <name>', 'inspect or remove saved sequences'],
+        ['chain add -n <name> -s "<op> [args]" ...', 'save a named, agent-agnostic task sequence'],
+        ['chain run <name> -a <agentId|all>', 'run a saved sequence against the given agent'],
+        ['chain list [name] | delete <name>', 'inspect or remove saved sequences'],
         ['agents', 'list historically discovered agents'],
         ['history [n]', 'last n requests/responses (default 20)'],
         ['poll', 'fetch results or show locally pending direct tasks'],
@@ -455,6 +392,7 @@ async function main() {
           table(funRows),
           '',
           dim('  path args are absolute or relative to the agent cwd (see pwd/cd).'),
+          dim('  chain flags: -n/--name, -a/--agent|--agentId, -s/--step (repeatable; quote steps with spaces).'),
           dim('  agent discoveries and task results print as live notifications.'),
           '',
         ].join('\n'),
@@ -541,25 +479,40 @@ async function main() {
       }
     },
 
-    async playbook(line) {
-      const file = path.join(path.dirname(statePath), 'playbooks.json');
-      const tokens = line.trim().split(/\s+/);
+    async chain(line) {
+      const file = path.join(path.dirname(statePath), 'chains.json');
+      const usage =
+        'usage: chain list [name] | add -n <name> -s "<op> [args]" ... | delete <name> | run <name> -a <agentId|all>';
+      const tokens = tokenize(line);
       const sub = tokens[1] ?? 'list';
-      const name = tokens[2];
-      const map = loadPlaybooks(file);
+      const { flags, positional } = parseChainFlags(tokens.slice(2));
+      // Name may come from -n/--name or the first positional argument.
+      if (flags.name && positional[0] && flags.name !== positional[0]) {
+        throw new Error(`conflicting chain names: -n "${flags.name}" vs "${positional[0]}"`);
+      }
+      const name = flags.name ?? positional[0];
+      if (positional.length > 1) {
+        throw new Error(`unexpected arguments: ${positional.slice(1).join(' ')}\n${usage}`);
+      }
+
+      const migrated = migrateLegacyPlaybooks(file);
+      if (migrated) {
+        console.log(dim(`migrated ${path.basename(migrated)} -> ${path.basename(file)} (legacy kept as ${path.basename(migrated)}.bak)`));
+      }
+      const map = loadChains(file);
 
       if (sub === 'list') {
-        // `list <name>` shows one playbook's steps; bare `list` the overview.
+        // `list <name>` shows one chain's steps; bare `list` the overview.
         if (name) {
           const steps = map[name];
-          if (!steps) throw new Error(`unknown playbook "${name}" — see: playbook list`);
-          console.log(section(`playbook "${name}" (${steps.length} steps):`));
+          if (!steps) throw new Error(`unknown chain "${name}" — see: chain list`);
+          console.log(section(`chain "${name}" (${steps.length} steps):`));
           steps.forEach((s, i) => console.log(`  ${dim(`${i + 1}.`)} ${s}`));
           return;
         }
         const names = Object.keys(map);
         if (names.length === 0) {
-          console.log(dim('no playbooks — add one with: playbook add <name> <cmd> then <cmd> ...'));
+          console.log(dim('no chains — add one with: chain add -n <name> -s "<op> [args]" -s "<op> [args]" ...'));
           console.log(dim(`(stored in ${file}, also editable by hand as JSON)`));
           return;
         }
@@ -571,43 +524,39 @@ async function main() {
 
       if (sub === 'add') {
         assertValidName(name);
-        const marker = ` ${name} `;
-        const idx = line.indexOf(marker);
-        const steps = parseSteps(idx === -1 ? '' : line.slice(idx + marker.length));
-        const next = setPlaybook(map, name, steps);
-        savePlaybooks(file, next);
+        if (flags.agent) {
+          throw new Error('chains are agent-agnostic — pass the target at run time: chain run <name> -a <agentId|all>');
+        }
+        const next = setChain(map, name, flags.steps);
+        saveChains(file, next);
         console.log(
-          `${Object.hasOwn(map, name) ? 'replaced' : 'added'} playbook ${cmdName(name)} ` +
-            dim(`(${steps.length} step(s), saved to ${file})`),
+          `${Object.hasOwn(map, name) ? 'replaced' : 'added'} chain ${cmdName(name)} ` +
+            dim(`(${flags.steps.length} step(s), saved to ${file})`),
         );
         return;
       }
 
       if (sub === 'delete') {
-        savePlaybooks(file, deletePlaybook(map, name));
-        console.log(`deleted playbook ${cmdName(name)}`);
+        saveChains(file, deleteChain(map, name));
+        console.log(`deleted chain ${cmdName(name)}`);
         return;
       }
 
       if (sub === 'run') {
-        const steps = map[name];
-        if (!steps) throw new Error(`unknown playbook "${name ?? ''}" — see: playbook list`);
-        console.log(section(`running playbook "${name}" (${steps.length} steps)`));
+        const steps = map[name ?? ''];
+        if (!steps) throw new Error(`unknown chain "${name ?? ''}" — see: chain list`);
+        if (!flags.agent) throw new Error(`chain run needs a target agent: chain run ${name} -a <agentId|all>`);
+        console.log(section(`running chain "${name}" against ${flags.agent} (${steps.length} steps)`));
         for (const [i, step] of steps.entries()) {
-          const cmd = step.split(/\s+/)[0];
-          if (cmd === 'playbook' || cmd === 'exit' || cmd === 'quit') {
-            throw new Error(`step ${i + 1} ("${step}") is not allowed inside a playbook`);
-          }
-          if (!commands[cmd]) {
-            throw new Error(`step ${i + 1}: unknown command "${cmd}" — fix the playbook (${file})`);
-          }
           console.log(dim(`[${i + 1}/${steps.length}] ${step}`));
-          await commands[cmd](step);
+          // Steps are validated bare task ops; dispatch through the normal
+          // task path so agent checks and payload validation stay central.
+          await commands.task(`task ${flags.agent} ${step}`);
         }
         return;
       }
 
-      console.log('usage: playbook list [name] | add <name> <cmd> then <cmd> ... | delete <name> | run <name>');
+      console.log(usage);
     },
 
     stats() {
@@ -653,6 +602,8 @@ async function main() {
         return;
       } else if (cmd === 'watch') {
         console.log('watch is gone — live notifications already poll in the background');
+      } else if (cmd === 'playbook') {
+        console.log('playbook is now "chain" — see help; an existing playbooks.json migrates on first chain use');
       } else if (commands[cmd]) {
         await commands[cmd](trimmed);
       } else {
