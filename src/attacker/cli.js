@@ -41,7 +41,12 @@ import {
 import { OP_DEFS, parseOpArgs } from '../common/ops.js';
 import { RegistryClient } from '../common/registry.js';
 import { saveState } from '../victim/agent.js';
-import { assertKnownAgent, loadAttackerState } from './state.js';
+import {
+  assertKnownAgent,
+  loadAttackerState,
+  renameAgent,
+  resolveAgentReference,
+} from './state.js';
 import {
   createSingleFlight,
   formatLiveNotification,
@@ -161,7 +166,7 @@ async function main() {
     console: false, // keep REPL output clean; log lines go to the file only
   });
   const statePath = path.resolve(cfg.stateFile || 'attacker-state.json');
-  const state = loadAttackerState(statePath);
+  let state = loadAttackerState(statePath);
   const save = () => saveState(statePath, state);
   const ttlMs = taskTtlMs(cfg.pollIntervalSec);
 
@@ -227,11 +232,16 @@ async function main() {
     notify(`[${ts()}] ${c('green', '[+] agent discovered:')} ${c('bold', agentId)}`, redraw);
   }
 
+  function agentLabel(agentId) {
+    const alias = state.agentAliases[agentId];
+    return alias ? `${alias} (${agentId})` : agentId;
+  }
+
   function printResult(agentId, r, redraw = true) {
     const op = sanitizeRegistryText(r.op ?? '?', 64);
     const output = sanitizeRegistryText(r.output);
     const error = sanitizeRegistryText(r.error);
-    const head = `[${ts()}] ${c('magenta', agentId)} #${r.seq} ${op}`;
+    const head = `[${ts()}] ${c('magenta', agentLabel(agentId))} #${r.seq} ${op}`;
     if (!r.ok) {
       notify(`${head} ${c('red', 'FAILED')}:${formatResultBody(error)}`, redraw);
       return;
@@ -406,6 +416,7 @@ async function main() {
         ['task <agentId|all> <op> [args]', 'task one known agent or broadcast to all'],
         ['attach <agentId>', 'attach the prompt to one known agent', true],
         ['detach', 'leave attached-agent mode', true],
+        ['rename <agentId> <name>', 'assign a durable local display name', true],
         ['chain add -n <name> -s "<op> [args]" ...', 'save a named, agent-agnostic task sequence', true],
         ['chain run <name> -a <agentId|all>', 'run a saved sequence against the given agent', true],
         ['chain list [name] | delete <name>', 'inspect or remove saved sequences', true],
@@ -452,7 +463,7 @@ async function main() {
       } else {
         for (const a of state.agents) {
           console.log(
-            `  ${c(['bold', 'green'], a)}  ${c('yellow', 'known')}, ${dim(`${state.perAgent[a] ?? 0} results`)}`,
+            `  ${c(['bold', 'green'], agentLabel(a))}  ${c('yellow', 'known')}, ${dim(`${state.perAgent[a] ?? 0} results`)}`,
           );
         }
       }
@@ -470,8 +481,9 @@ async function main() {
         if (state.agents.length === 0) throw new Error('no known agents available; task not sent');
         await sendTask('all', op, args);
       } else {
-        assertKnownAgent(state, target);
-        await sendTask(target, op, args);
+        const agentId = resolveAgentReference(state, target);
+        assertKnownAgent(state, agentId ?? target);
+        await sendTask(agentId, op, args);
       }
     },
 
@@ -485,10 +497,20 @@ async function main() {
       } catch (err) {
         logger.warn(`agent discovery refresh failed before attach: ${err.message}`);
       }
-      assertKnownAgent(state, agentId);
-      attachedAgentId = agentId;
-      setPrompt(`${agentId}@kc2> `);
-      console.log(`attached to ${agentId}; bare KC2 task operations now target it; results remain asynchronous`);
+      const resolvedAgentId = resolveAgentReference(state, agentId);
+      assertKnownAgent(state, resolvedAgentId ?? agentId);
+      attachedAgentId = resolvedAgentId;
+      setPrompt(`${agentLabel(resolvedAgentId)}@kc2> `);
+      console.log(`attached to ${agentLabel(resolvedAgentId)}; bare KC2 task operations now target it; results remain asynchronous`);
+    },
+
+    rename(line) {
+      const tokens = line.trim().split(/\s+/);
+      if (tokens.length !== 3) throw new Error('usage: rename <agentId> <name>');
+      state = renameAgent(state, tokens[1], tokens[2]);
+      save();
+      const agentId = resolveAgentReference(state, tokens[2]);
+      console.log(`renamed ${agentId} to ${tokens[2]} (local display name)`);
     },
 
     detach() {

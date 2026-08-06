@@ -23,7 +23,13 @@ import {
   pendingDirectTasks,
   sanitizeRegistryText,
 } from '../src/attacker/cli.js';
-import { assertKnownAgent, defaultAttackerState, loadAttackerState } from '../src/attacker/state.js';
+import {
+  assertKnownAgent,
+  defaultAttackerState,
+  loadAttackerState,
+  renameAgent,
+  resolveAgentReference,
+} from '../src/attacker/state.js';
 
 const AGENT = 'a1b2c3d4';
 
@@ -593,6 +599,18 @@ test('attacker state fails closed on corrupt JSON but permits a missing file', (
 test('direct tasking requires a historically known agent', () => {
   assert.doesNotThrow(() => assertKnownAgent({ agents: [AGENT] }, AGENT));
   assert.throws(() => assertKnownAgent({ agents: [AGENT] }, 'missing'), /not known/);
+});
+
+test('agent aliases rename local references without changing the registry identity', () => {
+  const state = { ...defaultAttackerState(), agents: [AGENT] };
+  const renamed = renameAgent(state, AGENT, 'research_vm');
+
+  assert.deepEqual(renamed.agentAliases, { [AGENT]: 'research_vm' });
+  assert.equal(resolveAgentReference(renamed, 'research_vm'), AGENT);
+  assert.equal(resolveAgentReference(renamed, AGENT), AGENT);
+  assert.throws(() => renameAgent(renamed, AGENT, 'all'), /reserved/);
+  assert.throws(() => renameAgent(renamed, AGENT, AGENT), /already/);
+  assert.throws(() => renameAgent(renamed, AGENT, 'bad-name'), /invalid/);
 });
 
 test('single-flight polling makes concurrent callers await one refresh', async () => {

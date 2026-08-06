@@ -98,12 +98,14 @@ test('CLI uses historical discovery, rejects unknown direct targets, and sends o
   };
   const result = await runCli(
     ['src/attacker/cli.js', '--config', configFile],
-    `agents\ntask missing ping\ntask ${agentId} ping\ntask all ping\nagents\nexit\n`,
+    `agents\nrename ${agentId} research_vm\ntask missing ping\ntask research_vm ping\ntask all ping\nagents\nexit\n`,
     env,
   );
 
   assert.equal(result.code, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /agent1\s+known/);
+  assert.match(result.stdout, /renamed agent1 to research_vm \(local display name\)/);
+  assert.match(result.stdout, /research_vm \(agent1\)\s+known/);
   assert.doesNotMatch(result.stdout, /clock-ahead|\/lab|online|offline|unknown/);
   assert.match(result.stdout, /agent "missing" is not known; task not sent/);
   assert.match(result.stdout, /sent: task #5 ping -> agent1/);
@@ -114,6 +116,7 @@ test('CLI uses historical discovery, rejects unknown direct targets, and sends o
     ['all', 6],
   ]);
   assert.deepEqual(commandWrites.map(({ payload }) => payload.lease), [undefined, undefined]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')).agentAliases, { [agentId]: 'research_vm' });
 });
 
 test('CLI polling preserves locally sent commands beyond the legacy task TTL', async (t) => {

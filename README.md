@@ -192,6 +192,7 @@ response history, stats). Delete them to reset a side.
 | `task <agentId\|all> <op> [args...]` | task one known agent or publish one broadcast for all agents |
 | `attach <agentId>` | attach the prompt to one known agent; bare task operations target it |
 | `detach` | leave attached-agent mode and restore the normal prompt |
+| `rename <agentId> <name>` | assign a durable local display name; registry identity is unchanged |
 | `chain list\|add\|delete\|run` | named, agent-agnostic task sequences (`chains.json`) |
 | `history [n]` | show the last n requests/responses (default 20, persisted) |
 | `poll` | fetch new results; show locally pending direct tasks while waiting |
