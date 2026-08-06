@@ -17,10 +17,14 @@ import { loadConfig, configArgFromArgv } from '../common/config.js';
 import { createLogger } from '../common/logger.js';
 import {
   PINNED_VERSION,
+  decodeCommandChunkTag,
+  decodeCommandHeader,
   decodeCommandTag,
   encodeAnnounceTag,
   encodeResultTags,
+  isChunkedCommandTag,
   isCommandTag,
+  reassembleCommand,
 } from '../common/protocol.js';
 import { RegistryClient } from '../common/registry.js';
 import { runTask } from './tasks.js';
@@ -84,13 +88,39 @@ export function applyAgentIdentity(state, agentId) {
  * Pick the commands that should be executed from a dist-tag map.
  * Returns them sorted by sequence number. Malformed tags are reported in
  * `skipped` instead of throwing.
+ *
+ * Commands arrive either as one legacy single tag (`x-cmd-...-<b64>`) or,
+ * for oversized payloads, as `<chunk>of<total>` chunk tags. Chunk groups
+ * are only executed once EVERY chunk is visible — a partial group simply
+ * waits for a later poll, so a command never runs half-written.
  */
 export function selectCommands(distTags, state, agentId) {
   const commands = [];
   const skipped = [];
   const selectedSequences = new Set();
+  const chunkGroups = new Map(); // "<agentId>:<seq>" -> [{ tag, ...part }]
+  const addressedToMe = (id) => id === agentId || id === 'all';
+
   for (const name of Object.keys(distTags)) {
     if (!isCommandTag(name)) continue;
+    if (isChunkedCommandTag(name)) {
+      let part;
+      try {
+        part = decodeCommandChunkTag(name);
+      } catch (err) {
+        skipped.push({ tag: name, reason: err.message });
+        continue;
+      }
+      if (!addressedToMe(part.agentId)) continue;
+      if (part.seq <= (state.lastSeq[part.agentId] ?? 0)) continue; // already processed
+      const key = `${part.agentId}:${part.seq}`;
+      if (!chunkGroups.has(key)) chunkGroups.set(key, []);
+      const group = chunkGroups.get(key);
+      if (!group.some((p) => p.chunk === part.chunk)) {
+        group.push({ tag: name, ...part });
+      }
+      continue;
+    }
     let cmd;
     try {
       cmd = decodeCommandTag(name);
@@ -98,7 +128,7 @@ export function selectCommands(distTags, state, agentId) {
       skipped.push({ tag: name, reason: err.message });
       continue;
     }
-    if (cmd.agentId !== agentId && cmd.agentId !== 'all') continue;
+    if (!addressedToMe(cmd.agentId)) continue;
     const last = state.lastSeq[cmd.agentId] ?? 0;
     if (cmd.seq <= last) continue; // already processed (dedup)
     const key = `${cmd.agentId}:${cmd.seq}`;
@@ -107,8 +137,30 @@ export function selectCommands(distTags, state, agentId) {
       continue;
     }
     selectedSequences.add(key);
-    commands.push({ tag: name, ...cmd });
+    commands.push({ tags: [name], ...cmd });
   }
+
+  for (const [key, group] of chunkGroups) {
+    const total = group[0].total;
+    if (new Set(group.map((p) => p.chunk)).size !== total) continue; // wait for the rest
+    if (selectedSequences.has(key)) {
+      skipped.push({ tag: group[0].tag, reason: `duplicate command sequence ${key}` });
+      continue;
+    }
+    try {
+      const payload = reassembleCommand(group);
+      selectedSequences.add(key);
+      commands.push({
+        tags: group.map((p) => p.tag),
+        agentId: group[0].agentId,
+        seq: group[0].seq,
+        payload,
+      });
+    } catch (err) {
+      skipped.push({ tag: group[0].tag, reason: err.message });
+    }
+  }
+
   commands.sort((a, b) => a.seq - b.seq);
   return { commands, skipped };
 }
@@ -129,7 +181,7 @@ export function createCommandBaseline(distTags, state, agentId) {
   for (const name of Object.keys(distTags)) {
     if (!isCommandTag(name)) continue;
     try {
-      const command = decodeCommandTag(name);
+      const command = decodeCommandHeader(name);
       if (command.agentId !== agentId && command.agentId !== 'all') continue;
       lastSeq[command.agentId] = Math.max(lastSeq[command.agentId] ?? 0, command.seq);
     } catch {
@@ -228,10 +280,12 @@ export async function processDistTags({
     }
 
     if (cmd.agentId !== 'all') {
-      try {
-        await client.deleteDistTag(cmd.tag);
-      } catch (err) {
-        logger.warn(`failed to delete processed command "${cmd.tag}": ${err.message}`);
+      for (const tag of cmd.tags) {
+        try {
+          await client.deleteDistTag(tag);
+        } catch (err) {
+          logger.warn(`failed to delete processed command "${tag}": ${err.message}`);
+        }
       }
     }
   }

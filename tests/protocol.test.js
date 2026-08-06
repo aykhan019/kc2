@@ -6,17 +6,22 @@ import {
   ProtocolError,
   assertValidTagName,
   decodeAnnounceTag,
+  decodeCommandChunkTag,
+  decodeCommandHeader,
   decodeCommandTag,
   decodePayload,
   decodeResultTag,
   encodeAnnounceTag,
   encodeCommandTag,
+  encodeCommandTags,
   encodePayload,
   encodeResultTags,
   isAnnounceTag,
+  isChunkedCommandTag,
   isCommandTag,
   isLabTag,
   isResultTag,
+  reassembleCommand,
   reassembleResult,
 } from '../src/common/protocol.js';
 
@@ -88,6 +93,60 @@ test('malformed command tags throw ProtocolError', () => {
   assert.throws(() => decodeCommandTag(`x-cmd-a1-3-${Buffer.from('not json').toString('base64url')}`), ProtocolError);
   // valid JSON but missing "op"
   assert.throws(() => decodeCommandTag(`x-cmd-a1-3-${encodePayload({ nope: 1 })}`), ProtocolError);
+});
+
+test('encodeCommandTags keeps fitting payloads in the legacy single-tag format', () => {
+  const payload = { op: 'echo', args: { text: 'short' }, ts: 1720000000000 };
+  const tags = encodeCommandTags(AGENT, 7, payload);
+  assert.deepEqual(tags, [encodeCommandTag(AGENT, 7, payload)]);
+  assert.ok(!isChunkedCommandTag(tags[0]));
+  assert.deepEqual(decodeCommandTag(tags[0]).payload, payload);
+  assert.deepEqual(decodeCommandHeader(tags[0]), { agentId: AGENT, seq: 7 });
+});
+
+test('oversized command is chunked; every tag fits; reassembly works out of order', () => {
+  const payload = { op: 'echo', args: { text: 'X'.repeat(2000) }, ts: 1720000000000 };
+  const tags = encodeCommandTags(AGENT, 11, payload);
+  assert.ok(tags.length > 1, `expected multiple chunk tags, got ${tags.length}`);
+  const parts = [];
+  for (const tag of tags) {
+    assert.ok(tag.length <= MAX_TAG_LEN, `tag too long: ${tag.length}`);
+    assert.equal(encodeURIComponent(tag), tag);
+    assert.ok(isChunkedCommandTag(tag));
+    assert.ok(isCommandTag(tag), 'chunk tags must still classify as command tags');
+    const part = decodeCommandChunkTag(tag);
+    assert.equal(part.agentId, AGENT);
+    assert.equal(part.seq, 11);
+    assert.equal(part.total, tags.length);
+    parts.push(part);
+    // legacy decoders refuse chunk tags: old victims skip, never run partials
+    assert.throws(() => decodeCommandTag(tag), ProtocolError);
+  }
+  const shuffled = [...parts].reverse();
+  assert.deepEqual(reassembleCommand(shuffled), payload);
+  assert.deepEqual(decodeCommandHeader(tags[0]), { agentId: AGENT, seq: 11 });
+});
+
+test('reassembleCommand rejects incomplete, inconsistent, or op-less chunks', () => {
+  const payload = { op: 'echo', args: { text: 'Y'.repeat(1500) }, ts: 1 };
+  const tags = encodeCommandTags(AGENT, 3, payload);
+  const parts = tags.map(decodeCommandChunkTag);
+  assert.throws(() => reassembleCommand(parts.slice(1)), /incomplete command/);
+  assert.throws(() => reassembleCommand([]), /no command chunks/);
+  const alien = { ...parts[0], agentId: 'zz' };
+  assert.throws(() => reassembleCommand([parts[0], alien]), /inconsistent/);
+  const badTotal = { ...parts[0], total: parts[0].total + 1 };
+  assert.throws(() => reassembleCommand([badTotal, ...parts.slice(1)]), /inconsistent/);
+});
+
+test('malformed command chunk tags throw ProtocolError', () => {
+  assert.throws(() => decodeCommandChunkTag('x-cmd-a1-3-eyJvcCI6InBpbmcifQ'), /not a chunked/);
+  assert.throws(() => decodeCommandChunkTag('x-cmd-a1-3-0of2-Zm9v'), /out of range/);
+  assert.throws(() => decodeCommandChunkTag('x-cmd-a1-3-1of1-Zm9v'), /out of range/);
+  assert.throws(() => decodeCommandChunkTag('x-cmd-a1-3-3of2-Zm9v'), /out of range/);
+  assert.throws(() => decodeCommandChunkTag('x-cmd-a1-3-1of2-!!!'), /bad payload/);
+  // an agentId with '-' shifts the fields, so the chunk spec no longer parses
+  assert.throws(() => decodeCommandChunkTag('x-cmd-bad-id-3-1of2-Zm9v'), /not a chunked/);
 });
 
 test('single-chunk result round-trip', () => {

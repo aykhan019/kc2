@@ -19,6 +19,7 @@ at an existing version. So:
 
 ```abnf
 command-tag  = "x-cmd-" agent-id "-" seq "-" b64payload
+command-tag  =/ "x-cmd-" agent-id "-" seq "-" chunk "of" total "-" b64chunk
 result-tag   = "x-res-" agent-id "-" seq "-" chunk "of" total "-" b64chunk
 announce-tag = "x-ann-" agent-id "-" b64payload
 
@@ -32,6 +33,8 @@ Examples:
 
 ```
 x-cmd-a1b2c3d4-7-eyJvcCI6InBpbmcifQ -> 1.0.0
+x-cmd-a1b2c3d4-8-1of2-eyJvcCI6ImVjaG8iLCJhcmdzIjp7InRleHQiOiJhYWFh -> 1.0.0
+x-cmd-a1b2c3d4-8-2of2-YWFhIn19 -> 1.0.0
 x-res-a1b2c3d4-7-1of2-eyJzZXEiOjcsIm9rIjp0cnVlLCJvdXRwdXQiOiJwb -> 1.0.0
 x-res-a1b2c3d4-7-2of2-25nIn0 -> 1.0.0
 x-ann-a1b2c3d4-eyJ2IjoxfQ -> 1.0.0
@@ -51,10 +54,12 @@ x-ann-a1b2c3d4-eyJ2IjoxfQ -> 1.0.0
   an `<agentId>:<seq>` identity. Victims still process a command only if
   `seq` is greater than the last processed seq for that command target — this
   per-target comparison is the dedup mechanism.
-- **chunk spec `<chunk>of<total>`** — result payloads are split into 1-based
-  chunks. `1of3`, `2of3`, `3of3` reassemble (in chunk order) to the full
-  base64url string. The word `of` is used instead of `/` because `/` is
-  URL-encoded by `encodeURIComponent`, which npm forbids in tag names.
+- **chunk spec `<chunk>of<total>`** — oversized command and result payloads
+  are split into 1-based chunks. `1of3`, `2of3`, `3of3` reassemble (in chunk
+  order) to the full base64url string. The word `of` is used instead of `/`
+  because `/` is URL-encoded by `encodeURIComponent`, which npm forbids in
+  tag names. Commands that fit in one tag keep the plain single-tag form, so
+  a chunk spec only ever appears on multi-tag payloads.
 - **payload** — base64url **without padding**, lowercase-safe alphabet
   (`A–Z a–z 0–9 - _`). Everything in a tag name survives
   `encodeURIComponent` unchanged, which npm requires.
@@ -121,9 +126,15 @@ tag; the victim does not remove its stable marker during shutdown.
 
 npm caps dist-tag names at **214 characters**. The encoder enforces this:
 
-- **Commands are never chunked.** If a command payload does not fit in a
-  single tag, `encodeCommandTag` throws and the CLI reports the error. Keep
-  commands small (an `echo` text of roughly 120 characters fits).
+- **Commands are chunked only when oversized.** A command that fits keeps
+  the legacy single-tag format (`x-cmd-<agent>-<seq>-<b64>`), so older
+  victims keep working unchanged. A larger payload is split into
+  `<chunk>of<total>` command tags, exactly like results. The victim groups
+  chunks by `<agentId>:<seq>` and executes **only once every chunk is
+  visible** — a partial group simply waits for a later poll, so a command
+  never runs half-written. Older victims cannot decode chunk tags at all:
+  they log and skip them, which fails safe (no partial execution). After
+  processing, the victim deletes every chunk tag of a direct command.
 - **Results are chunked.** `encodeResultTags` computes the largest chunk
   size that keeps every chunk tag ≤ 214 chars, accounting for the digits in
   `<chunk>of<total>`. Chunks for one result share the same `agent-id` and

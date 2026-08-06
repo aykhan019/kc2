@@ -36,6 +36,24 @@ export function formatLiveNotification(line, clearPrompt) {
   return clearPrompt ? `\r\x1b[2K${line}` : line;
 }
 
+/**
+ * Row geometry of the wrapped prompt+input block in a terminal: which row
+ * the cursor sits on (0 = first row of the block) and how many rows the
+ * block spans in total. The CLI uses this to erase the WHOLE block before
+ * printing a live notification over it — readline's own refresh only
+ * clears the cursor row, which shreds long, multi-row input lines into
+ * stray prompt fragments.
+ */
+export function inputBlockGeometry(lineLength, cursor, { promptWidth, columns } = {}) {
+  const cols = Math.max(1, Math.floor(columns) || 80);
+  const prompt = Math.max(0, promptWidth | 0);
+  const line = Math.max(0, lineLength | 0);
+  const at = Math.min(line, Math.max(0, cursor | 0));
+  const cursorRow = Math.floor((prompt + at) / cols);
+  const totalRows = Math.floor((prompt + line) / cols) + 1;
+  return { cursorRow, totalRows };
+}
+
 /** Direct requests without a matching locally recorded response. */
 export function pendingDirectTasks(history, { now = Date.now(), ttlMs = Infinity } = {}) {
   const completed = new Set(

@@ -197,6 +197,12 @@ response history, stats). Delete them to reset a side.
 | `stats` | local counters: sent, received, per-agent |
 | `help`, `exit` | — |
 
+Command payloads that do not fit in one 214-character dist-tag (roughly
+anything past ~90 chars of arguments) are split automatically into
+`<chunk>of<total>` command tags; the victim buffers the parts and executes
+the command only once every chunk is visible, so long commands are safe to
+type or paste.
+
 `chain` manages named, reusable task sequences stored in `chains.json`
 (owner-only, next to the attacker state file). A chain is a list of bare
 task ops — no target agent baked in — so the same sequence can be run
