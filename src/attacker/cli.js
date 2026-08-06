@@ -40,6 +40,21 @@ import { OP_DEFS, getOpDef } from '../common/ops.js';
 import { RegistryClient } from '../common/registry.js';
 import { saveState } from '../victim/agent.js';
 import { assertKnownAgent, loadAttackerState } from './state.js';
+import {
+  createSingleFlight,
+  formatLiveNotification,
+  formatResultBody,
+  pendingDirectTasks,
+  sanitizeRegistryText,
+} from './text.js';
+
+// Re-exported so existing imports from this module keep working.
+export {
+  createSingleFlight,
+  formatLiveNotification,
+  pendingDirectTasks,
+  sanitizeRegistryText,
+} from './text.js';
 
 const tty = process.stdout.isTTY;
 const c = (color, s) => (tty ? styleText(color, s) : s);
@@ -55,9 +70,6 @@ const dim = (s) => c('dim', s);
 
 const HISTORY_MAX = 200; // persisted entries, capped so the state file stays small
 const HISTORY_OUTPUT_MAX = 300; // chars of a result output kept in history
-const REGISTRY_TEXT_MAX = 4_000;
-const ANSI_CSI_RE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
-const TERMINAL_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/g;
 
 function ts() {
   return new Date().toTimeString().slice(0, 8);
@@ -68,70 +80,6 @@ function pushHistory(state, entry) {
   if (state.history.length > HISTORY_MAX) {
     state.history.splice(0, state.history.length - HISTORY_MAX);
   }
-}
-
-/** Direct requests without a matching locally recorded response. */
-export function pendingDirectTasks(history, { now = Date.now(), ttlMs = Infinity } = {}) {
-  const completed = new Set(
-    history
-      .filter((entry) => entry.dir === 'in')
-      .map((entry) => `${entry.agentId}:${entry.seq}:${entry.op}`),
-  );
-  return history.filter(
-    (entry) =>
-      entry.dir === 'out' &&
-      entry.target !== 'all' &&
-      now - entry.ts < ttlMs &&
-      !completed.has(`${entry.target}:${entry.seq}:${entry.op}`),
-  );
-}
-
-/** Render registry-controlled text without terminal escapes or unbounded output. */
-export function sanitizeRegistryText(value, maxLength = REGISTRY_TEXT_MAX) {
-  const text = typeof value === 'string' ? value : String(value ?? '');
-  return text
-    .replace(ANSI_CSI_RE, '')
-    .replace(TERMINAL_CONTROL_RE, (character) => {
-      // Newlines are safe once escape sequences are gone: keep them so
-      // multi-line task output stays readable in the CLI.
-      if (character === '\n') return '\n';
-      if (character === '\t') return '\\t';
-      return '';
-    })
-    .slice(0, maxLength);
-}
-
-/**
- * Format a result body for display: inline after the header when it is a
- * single line, otherwise as an indented block on the following lines.
- */
-function formatResultBody(body) {
-  if (!body.includes('\n')) return ` ${body}`;
-  const lines = body.split('\n').map((line) => `  ${line}`);
-  return `\n${lines.join('\n')}`;
-}
-
-/** Coalesce concurrent refresh callers onto the same in-flight promise. */
-export function createSingleFlight(fn) {
-  let inFlight = null;
-  return (...args) => {
-    if (inFlight) return inFlight;
-    let result;
-    try {
-      result = fn(...args);
-    } catch (err) {
-      result = Promise.reject(err);
-    }
-    const shared = Promise.resolve(result).finally(() => {
-      if (inFlight === shared) inFlight = null;
-    });
-    inFlight = shared;
-    return shared;
-  };
-}
-
-export function formatLiveNotification(line, clearPrompt) {
-  return clearPrompt ? `\r\x1b[2K${line}` : line;
 }
 
 // ---------------------------------------------------------------------------
