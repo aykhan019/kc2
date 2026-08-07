@@ -42,7 +42,8 @@ npm run publish:test-package -- --name='@your-npm-username/kc2-lab-test'
 # npm account security settings. If npm would require 2FA for writes, enable
 # the token's Bypass 2FA capability; KC2 cannot answer an interactive OTP
 # challenge. Never use this setting for a production package. Edit env.sh
-# directly so the token is not put into shell history.
+# directly and put the token in NPM_C2_TOKEN there, never in config.json or
+# on a command line (so it is not put into shell history).
 cp env.sh.example env.sh
 chmod 600 env.sh
 ${EDITOR:-vi} env.sh
@@ -51,18 +52,26 @@ if grep -qE 'npm_replace_me|@your-npm-username/' env.sh; then
   exit 1
 fi
 
-# 3. From this repository, use separate terminals for the long-running victim
+# 3. Create the local runtime configuration. Update only the features needed
+# for this authorized exercise; risky capabilities are false by default.
+cp config.example.json config.json
+${EDITOR:-vi} config.json
+
+# 4. From this repository, use separate terminals for the long-running victim
 # and interactive attacker processes.
 npm run victim                      # terminal 1
 npm run attacker                    # terminal 2
 ```
 
 Use a granular, short-lived npm token limited to that single disposable
-package. Store it only in mode-600 `env.sh` or as `NPM_C2_TOKEN` for both
-processes. Because the package is public, all dist-tag payloads are readable
-by anyone. The template explicitly sets every risky capability to `false`;
-these environment values override permissive values in `config.json` unless
-an authorized exercise deliberately changes them to `true`.
+package. Put it in `NPM_C2_TOKEN` in mode-600 `env.sh` only (or provide the
+same variable through a secure environment); never place the token in
+`config.json`. Because the package is public, all dist-tag payloads are
+readable by anyone. `config.json` is where you enable only the authorized
+features needed for the lab. The `env.sh` template explicitly sets every risky
+capability to `false`; those environment values override permissive values in
+`config.json` unless an authorized exercise deliberately changes them to
+`true`.
 
 Runtime state lives in the working directory:
 

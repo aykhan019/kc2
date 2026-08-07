@@ -79,7 +79,8 @@ npm login
 npm run publish:test-package -- --name='@your-npm-username/kc2-lab-test'
 
 # 2. In your npm account security settings, create a granular read/write token
-# restricted to this package. Create env.sh, then edit its package name and token.
+# restricted to this package. Create env.sh, then put the token in
+# NPM_C2_TOKEN and set the package name there. Never put the token in config.json.
 cp env.sh.example env.sh
 chmod 600 env.sh
 ${EDITOR:-vi} env.sh
@@ -88,7 +89,12 @@ if grep -qE 'npm_replace_me|@your-npm-username/' env.sh; then
   exit 1
 fi
 
-# 3. Start each process from this repository in a separate terminal.
+# 3. Create config.json and update only the authorized features needed for
+# this lab. Risky capabilities are false by default.
+cp config.example.json config.json
+${EDITOR:-vi} config.json
+
+# 4. Start each process from this repository in a separate terminal.
 npm run victim      # terminal 1
 npm run attacker    # terminal 2
 ```
@@ -140,8 +146,9 @@ startup otherwise fails closed. Do not enable insecure HTTP for this workflow.
 
 ## Configuration
 
-Copy `config.example.json` to `config.json` (both sides read it), or override
-with environment variables.
+Copy `config.example.json` to `config.json` (both sides read it) and update
+only the authorized features needed for the exercise, or override with
+environment variables. Keep the npm token out of `config.json`.
 
 **Recommended: `env.sh`.** Both sides auto-load an `env.sh` file in the
 project root at startup (`KEY=VALUE` or `export KEY=VALUE` lines). It is
