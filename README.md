@@ -70,15 +70,9 @@ or shared package: package dist-tags and their payloads are world-readable.
 npm ci
 npm login
 
-# 1. Create and publish a public, disposable package at version 1.0.0 once.
-package_dir="$(mktemp -d)"
-(
-  cd "$package_dir"
-  npm init -y
-  npm pkg set name='@your-npm-username/kc2-lab-test' version='1.0.0' private=false
-  npm publish --access public
-)
-rm -rf "$package_dir"
+# 1. Create and publish only a minimal public, disposable package at version
+# 1.0.0. The KC2 repository package is private and is never published.
+npm run publish:test-package -- --name='@your-npm-username/kc2-lab-test'
 
 # 2. In your npm account security settings, create a granular read/write token
 # restricted to this package. Create env.sh, then edit its package name and token.
