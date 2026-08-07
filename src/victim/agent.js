@@ -191,10 +191,8 @@ export function formatStartupReport(cfg, statePath, agentId, cwd = process.cwd()
     ['info', '  task controls', {
       revealEnv: cfg.revealEnv,
       funOps: cfg.enableFunOps,
-      screenshot: cfg.enableScreenshot,
       geolocate: cfg.enableGeolocate,
       exec: cfg.enableExec,
-      uploadEndpoints: cfg.uploadUrls.length + (cfg.uploadUrl ? 1 : 0),
     }],
     ['info', '  logging', { level: cfg.logLevel, file: cfg.logFile || 'disabled' }],
     ['info', 'victim agent ready; polling for new commands (Ctrl-C to stop)'],
@@ -372,18 +370,11 @@ async function main() {
   if (cfg.revealEnv) {
     logger.warn('revealEnv is ON — the env task returns real values; secrets may cross the channel');
   }
-  if (cfg.enableScreenshot) {
-    logger.warn('enableScreenshot is ON — the screenshot task can capture everything on screen');
-  }
   if (cfg.enableGeolocate) {
     logger.warn('enableGeolocate is ON — the geolocate task discloses this host\'s location over the channel');
   }
   if (cfg.enableExec) {
     logger.warn('enableExec is ON — the exec task runs arbitrary commands on this host');
-  }
-  if (cfg.uploadUrl || cfg.uploadUrls.length > 0) {
-    const endpoints = [...cfg.uploadUrls, ...(cfg.uploadUrl ? [cfg.uploadUrl] : [])];
-    logger.warn(`upload endpoints configured (${endpoints.join(', ')}) — screenshot bytes leave the lab to external services`);
   }
   if (!cfg.token) {
     logger.warn('NPM_C2_TOKEN is not set — result publishing will fail with 401');
@@ -435,10 +426,6 @@ async function main() {
           maxFileBytes: cfg.maxFileBytes,
           revealEnv: cfg.revealEnv,
           enableFunOps: cfg.enableFunOps,
-          enableScreenshot: cfg.enableScreenshot,
-          screenshotMaxWidth: cfg.screenshotMaxWidth,
-          uploadUrl: cfg.uploadUrl,
-          uploadUrls: cfg.uploadUrls,
           enableGeolocate: cfg.enableGeolocate,
           enableExec: cfg.enableExec,
           geolocateServiceUrl: cfg.geolocateServiceUrl,

@@ -1,8 +1,8 @@
 // Task dispatcher and allowlist registry. Handlers live in per-domain
-// modules — sysinfo.js (host recon), files.js (filesystem), screenshot.js,
-// geolocate.js, exec.js (opt-in arbitrary command), fun.js (desktop pranks).
+// modules — sysinfo.js (host recon), files.js (filesystem), geolocate.js,
+// exec.js (opt-in arbitrary command), fun.js (desktop pranks).
 // This module merges them into the TASKS map keyed by op name and enforces
-// the opt-in gates (fun/screenshot/geolocate/exec) in runTask.
+// the opt-in gates (fun/geolocate/exec) in runTask.
 //
 // This is a hard-coded allowlist on purpose: apart from the explicitly
 // gated `exec` demo op, the victim agent can NEVER execute arbitrary shell
@@ -13,7 +13,6 @@ import { getOpDef } from '../common/ops.js';
 import { runFunTask } from './fun.js';
 import { SYSINFO_TASKS } from './sysinfo.js';
 import { FILE_TASKS } from './files.js';
-import { SCREENSHOT_TASKS } from './screenshot.js';
 import { GEOLOCATE_TASKS } from './geolocate.js';
 import { EXEC_TASKS } from './exec.js';
 
@@ -29,14 +28,6 @@ export {
   FILE_TASKS,
 } from './files.js';
 export { PS_MAX_LINES, SYSINFO_TASKS } from './sysinfo.js';
-export {
-  DEFAULT_SCREENSHOT_MAX_WIDTH,
-  SCREENSHOT_MIN_WIDTH,
-  SCREENSHOT_WIDTH_RANGE,
-  normalizeUploadUrls,
-  uploadFileAndExtractUrl,
-  SCREENSHOT_TASKS,
-} from './screenshot.js';
 export {
   GEO_MAX_APS,
   GEO_MAX_SSID_LEN,
@@ -56,7 +47,6 @@ export { EXEC_TASKS } from './exec.js';
 const TASKS = {
   ...SYSINFO_TASKS,
   ...FILE_TASKS,
-  ...SCREENSHOT_TASKS,
   ...GEOLOCATE_TASKS,
   ...EXEC_TASKS,
 
@@ -89,9 +79,6 @@ export function runTask(op, args = {}, limits = {}) {
   }
   if (getOpDef(op)?.group === 'fun' && limits.enableFunOps === false) {
     return { ok: false, error: `task "${op}" is disabled; set enableFunOps only on an attended lab host` };
-  }
-  if (getOpDef(op)?.group === 'screen' && limits.enableScreenshot !== true) {
-    return { ok: false, error: `task "${op}" is disabled; set enableScreenshot only on an attended lab host` };
   }
   if (op === 'geolocate' && limits.enableGeolocate !== true) {
     return { ok: false, error: `task "${op}" is disabled; set enableGeolocate only on an attended lab host` };

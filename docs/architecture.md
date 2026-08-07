@@ -93,16 +93,15 @@ uses one broadcast tag shared by every polling victim.
   payloads here are deliberately only base64 (readable) — a real implant
   would encrypt, but the metadata pattern remains visible regardless.
 - **Shared write token**: attacker and victim both need write access to the
-  same package. In this lab, `scripts/setup-registry.sh` issues one token and
-  shares it with both sides for convenience — documented as such. A real
-  scenario implies an already-leaked maintainer token, which is itself a
-  detectable event.
+  same package. This lab requires a granular npm token scoped to one
+  operator-owned public test package. A real scenario implies an already-
+  leaked maintainer token, which is itself a detectable event.
 - **Rate limits / abuse controls**: npm rate-limits and monitors metadata
   writes; high-frequency tag churn on a single package is anomalous.
 - **Persistent artifacts**: npmjs.org requires interactive 2FA for sensitive
   package-management DELETE operations. Bypass-2FA granular tokens can add
   these tags but cannot clean them automatically, so command and result tags
-  accumulate with activity. The local Verdaccio lab permits cleanup.
+  accumulate with activity.
 - **No liveness or lease**: a discovered agent is only historically known.
   Commands queued after its initial baseline may execute after reconnect.
 - **No semver-safe hiding**: tag names cannot look like versions

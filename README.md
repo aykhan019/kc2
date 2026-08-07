@@ -7,18 +7,19 @@ inspired by the npm-c2 research. Built for understanding C2 channel design and
 **defender detection** — not for offensive use.
 
 > **Scope / ethics**: the victim agent executes only hard-coded mock tasks
-> (26 allowlisted ops — see `src/common/ops.js`: `echo`, `ping`, `time`,
+> (26 allowlisted operations — see `src/common/ops.js`: `echo`, `ping`, `time`,
 > `sysinfo`, `whoami`, `env`, `netinfo`, `ps`, `df`, `pwd`, `cd`, `ls`,
-> `stat`, `find`, `hash`, `getfile`, `screenshot`, `geolocate`, plus eight
-> visible/audible `fun` ops).
-> There is **no** arbitrary command
-> execution, persistence, privilege escalation, obfuscation, or encryption.
-> Path operations are confined to a configured filesystem root, and
+> `stat`, `find`, `hash`, `getfile`, `geolocate`, plus eight
+> visible/audible `fun` ops, plus the opt-in `exec` demo operation).
+> The opt-in `exec` demo operation can run an explicitly requested program
+> without shell parsing; there is no persistence, privilege escalation,
+> obfuscation, or encryption. Path operations are not confined to a
+> filesystem root, and
 > `getfile` reads one file under a small size cap. Desktop-affecting
 > operations and environment-value disclosure are disabled by default.
 > Payloads are deliberately plain base64 so
-> every artifact is readable and analyzable. The default registry is a
-> **local** verdaccio instance.
+> every artifact is readable and analyzable. The required workflow uses a
+> **public npm test package you own**.
 > Do not point this at packages or accounts you do not own.
 
 ## Architecture
@@ -27,7 +28,7 @@ inspired by the npm-c2 research. Built for understanding C2 channel design and
                   npm Registry
              (dist-tags mailbox)
           ┌───────────────────────┐
-          │  Package: my-package   │
+          │  Package: @your-npm-username/kc2-lab-test │
           │                       │
           │ latest -> 1.0.0       │
           │ x-cmd-* -> command    │
@@ -56,33 +57,35 @@ Deep dives:
 ## Requirements
 
 - Node.js 22 or 24 LTS (zero runtime npm dependencies — standard library only)
-- Any npm-compatible registry; a local [verdaccio](https://verdaccio.org/)
-  instance is the recommended lab default
+- An npm account and a public, throwaway npm test package you own
+- A granular npm access token limited to that package
 
 ## Quickstart
 
-Everything runs locally against a throwaway verdaccio registry:
+Use a public, throwaway npm test package that you own. Do not use an existing
+or shared package: package dist-tags and their payloads are world-readable.
 
 ```sh
-# 1. Start a local registry on :4873
-npx verdaccio &
+# 1. Create and publish a public, disposable package at version 1.0.0 once.
+mkdir kc2-lab-test && cd kc2-lab-test
+npm init -y
+npm pkg set name='@your-npm-username/kc2-lab-test' version='1.0.0' private=false
+npm publish --access public
+cd ..
+#    The package contents are not changed after this initial publish.
 
-# 2. Seed it (creates user, publishes my-package@1.0.0, writes token to ./.lab-token)
-sh scripts/setup-registry.sh
+# 2. Create env.sh from the template and set its package name and token.
+cp env.sh.example env.sh
+chmod 600 env.sh
 
-# 3. Start the victim agent and the interactive attacker CLI
+# 3. Start the victim agent and the interactive attacker CLI.
 npm run victim      # terminal 1
 npm run attacker    # terminal 2
 ```
 
-Both sides read the token from `env.sh` or the `NPM_C2_TOKEN` environment
-variable; the easiest path is to put it in `env.sh` (see Configuration below):
-
-```sh
-cp env.sh.example env.sh
-chmod 600 env.sh
-printf 'export NPM_C2_TOKEN="%s"\n' "$(cat .lab-token)" >> env.sh
-```
+Both sides read the package-scoped token from `env.sh` or the `NPM_C2_TOKEN`
+environment variable. `env.sh.example` includes the required npm registry and
+public-registry opt-in; replace the package-name placeholder and token.
 
 In the CLI:
 
@@ -91,7 +94,7 @@ kc2> task all ping              # one broadcast tag for all polling agents
 kc2> task all whoami            # report mock identity details
 kc2> task all pwd               # where is the agent?
 kc2> task all ls .              # list the agent's current directory
-kc2> task all getfile sample.txt  # fetch a file from the victim's filesystem root
+kc2> task all getfile sample.txt  # fetch a file from the agent's current directory
 kc2> agents                     # list historically discovered agents
 kc2> history 10                 # last 10 requests/responses
 kc2> stats                      # local counters
@@ -102,14 +105,13 @@ kc2> exit
 The CLI polls in the background while you type: agent discoveries and task
 completions/failures print as live notifications — no `watch` needed.
 
-To reset the lab: stop the victim/attacker/verdaccio processes, delete the
-state files, `.lab-token`, and the verdaccio storage directory, then re-run
-steps 1–2 above.
+To reset the lab: stop the victim and attacker, delete the local state files
+and `chains.json`, then manually remove the test package's KC2 dist-tags with
+`npm dist-tag rm`. Keep the published `1.0.0` placeholder version.
 
-## Using the real npmjs.org registry (optional, with warnings)
+## Public npm package safeguards
 
-The same code works against the real registry — that is the point of the
-research. If you do this:
+The public npm test package workflow is required. Before running it:
 
 - use a **throwaway package you own** (publish `1.0.0` once, e.g. scoped under
   your own user: `@youruser/c2-lab-test`);
@@ -120,12 +122,9 @@ research. If you do this:
 - remember that dist-tags on a public package are **world-readable**: anyone
   can see your commands and results.
 
-Set `registryUrl: "https://registry.npmjs.org"` and your `packageName` in
-`config.json` — or better, put everything including the token in `env.sh`
-(see below), which keeps secrets out of config files entirely.
-You must also set `NPM_C2_ALLOW_PUBLIC_REGISTRY=true`; startup otherwise fails
-closed. A token over non-loopback HTTP likewise requires the separate
-`NPM_C2_ALLOW_INSECURE_HTTP=true` isolated-lab opt-in.
+Set your package name and token in `env.sh` (see below), which keeps secrets
+out of config files entirely. `NPM_C2_ALLOW_PUBLIC_REGISTRY=true` is required;
+startup otherwise fails closed. Do not enable insecure HTTP for this workflow.
 
 ## Configuration
 
@@ -147,8 +146,12 @@ Real environment variables always win over `env.sh` values. Use
 `NPM_C2_ENV_FILE=/path/to/file` to load a different file. On POSIX systems,
 group- or world-readable env files are refused.
 
-The table lists built-in defaults. `config.example.json` intentionally enables
-`logs/lab.log` for local process runs; set `NPM_C2_LOG_FILE=` to disable it.
+The table lists built-in runtime defaults. The local-registry fallback values
+exist for backward compatibility and are not the supported workflow; use the
+public npm values in `config.example.json` or `env.sh.example`. Replace the
+package-name placeholder before use. The examples keep risky demo capabilities
+disabled; enable them only for a specific, authorized exercise. Set
+`NPM_C2_LOG_FILE=` to disable file logs.
 
 | Key / env var | Meaning | Default |
 |---|---|---|
@@ -162,14 +165,10 @@ The table lists built-in defaults. `config.example.json` intentionally enables
 | `revealEnv` / `NPM_C2_REVEAL_ENV` | let `env` return real values instead of `<redacted>` (`true`/`1`/`yes`) | `false` |
 | `downloadDir` / `NPM_C2_DOWNLOAD_DIR` | attacker destination for received files | `downloads` |
 | `enableFunOps` / `NPM_C2_ENABLE_FUN_OPS` | enable attended-host desktop actions | `false` |
-| `enableScreenshot` / `NPM_C2_ENABLE_SCREENSHOT` | enable the `screenshot` task (captures the whole screen) | `false` |
-| `screenshotMaxWidth` / `NPM_C2_SCREENSHOT_MAX_WIDTH` | starting width (px) of the screenshot JPEG downscale ladder, 160–7680 | `1280` |
-| `uploadUrl` / `NPM_C2_UPLOAD_URL` | anonymous no-key file-share endpoint (`0x0.st`/`tmpfiles.org` style); screenshots upload full-res and return just a URL. Empty = channel transfer | `""` |
-| `uploadUrls` / `NPM_C2_UPLOAD_URLS` | ordered fallback list of upload endpoints (comma-separated in env); tried before `uploadUrl` | `[]` |
 | `enableGeolocate` / `NPM_C2_ENABLE_GEOLOCATE` | enable the `geolocate` task (WiFi positioning demo; discloses host location) | `false` |
 | `geolocateServiceUrl` / `NPM_C2_GEOLOCATE_URL` | MLS/Ichnaea-compatible WPS endpoint (recommended: beaconDB, no key — see table below); empty = WiFi-scan-only mode | `""` |
 | `geolocateServiceKey` / `NPM_C2_GEOLOCATE_KEY` | API key appended as `?key=` to the WPS endpoint | `""` |
-| `allowPublicRegistry` / `NPM_C2_ALLOW_PUBLIC_REGISTRY` | opt in to `registry.npmjs.org` | `false` |
+| `allowPublicRegistry` / `NPM_C2_ALLOW_PUBLIC_REGISTRY` | required opt in to `registry.npmjs.org` | `false` |
 | `allowInsecureHttp` / `NPM_C2_ALLOW_INSECURE_HTTP` | permit token use over non-loopback HTTP | `false` |
 | `logLevel` / `NPM_C2_LOG_LEVEL` | `debug`/`info`/`warn`/`error` | `info` |
 | `requestTimeoutMs` / `NPM_C2_REQUEST_TIMEOUT_MS` | per-request timeout, 100–120000 ms | `10000` |
@@ -240,36 +239,7 @@ taking a path: `cd`, `stat`, `hash`, `getfile` — the path is **absolute, or
 relative to the agent's current working directory** (use `pwd` to see the cwd
 and `cd` to change it).
 `ls [path]` lists a directory (default: the agent's cwd)
-and `find <dir> <text>` searches file names recursively. `screenshot [maxwidth]`
-captures the whole screen (all displays) with OS built-in tools. What comes
-back depends on the victim's configuration:
-
-- **`uploadUrls`/`uploadUrl` set (exfil-by-reference demo)** — the
-  full-resolution PNG is uploaded with one multipart POST to the first
-  reachable anonymous, no-key file share (`https://0x0.st`,
-  `https://tmpfiles.org/api/v1/upload`, or any `-F file=@`-compatible
-  endpoint; services are tried in order) and the result is just the URL — a
-  single result tag instead of hundreds. This mirrors the real-world
-  "living off trusted sites" pattern: the C2 channel carries a reference,
-  never the bytes. Uploaded links are world-readable; treat them as expired
-  after the demo. If every service fails, the task falls back to channel
-  transfer automatically.
-- **no upload endpoint (default)** — the image rides the dist-tag channel
-  like `getfile`, size-capped by `maxFileBytes`. A raw full-screen PNG
-  rarely fits the ~130-bytes-per-tag channel, so when the PNG exceeds the
-  cap the victim walks a downscale ladder and sends a JPEG at the largest
-  width that fits — starting at `maxwidth` (default: the victim's
-  `screenshotMaxWidth`, 1280) down to a 240px floor (`sips` on macOS,
-  ImageMagick on Linux, System.Drawing on Windows); it only fails if even
-  the floor exceeds the cap.
-
-`screenshot` requires
-`enableScreenshot=true` on the victim, and on macOS the agent's terminal needs
-Screen Recording permission. On Linux the victim tries tools in session order
-(Wayland: `gnome-screenshot`, `spectacle`, `grim`; X11: `import`, `scrot`) and
-verifies each actually wrote an image; note that GNOME Wayland blocks silent
-capture by design (portal consent dialog), so unattended demos need KDE
-(`spectacle`), a wlroots compositor (`grim`), or an X11 session (`scrot`). `geolocate` demonstrates the classic WiFi
+and `find <dir> <text>` searches file names recursively. `geolocate` demonstrates the classic WiFi
 positioning attack: the agent scans the BSSIDs its radio can hear with OS
 built-in tools (`airport`/`system_profiler` on macOS, `nmcli` on Linux,
 `netsh wlan` on Windows), then — when `geolocateServiceUrl` is configured —
@@ -327,9 +297,9 @@ create additional discovery tags.
 
 On npmjs.org, sensitive package-management DELETE operations require
 interactive 2FA and cannot be automated with a bypass-2FA granular token.
-Consequently `clean` is automatic on the local Verdaccio lab but may fail on
-npmjs.org; use interactive `npm dist-tag rm ...` for manual cleanup. Command
-and result tags otherwise remain and accumulate with task activity.
+Consequently `clean` may fail; use interactive `npm dist-tag rm ...` for
+manual cleanup. Command and result tags otherwise remain and accumulate with
+task activity.
 
 `getfile` transfers bytes, so small images and short video samples work the
 same way as text files. The attacker saves reassembled downloads under
@@ -354,9 +324,9 @@ Project layout:
 
 ```
 src/common/    protocol.js (codec) · ops.js (task allowlist metadata) · registry.js (HTTP client) · config.js · logger.js
-src/victim/    agent.js (poll loop) · tasks.js (core handlers) · fun.js (desktop handlers)
-src/attacker/  cli.js (REPL)
-scripts/       setup-registry.sh (seed a local registry) · check-source.mjs (lint)
+src/victim/    agent.js (poll loop) · tasks.js (dispatcher) · sysinfo.js · files.js · geolocate.js · exec.js · fun.js
+src/attacker/  cli.js (entrypoint) · cli-runtime.js (REPL/polling) · cli-commands.js (command handlers) · cli-display.js (presentation/persistence helpers)
+scripts/       check-source.mjs (lint)
 tests/         node:test unit tests
 docs/          protocol.md · architecture.md · detection.md
 ```

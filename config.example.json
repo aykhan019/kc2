@@ -1,6 +1,6 @@
 {
-  "registryUrl": "http://localhost:4873",
-  "packageName": "my-package",
+  "registryUrl": "https://registry.npmjs.org",
+  "packageName": "@your-npm-username/kc2-lab-test",
   "pollIntervalSec": 10,
   "agentId": "",
   "logFile": "logs/lab.log",
@@ -8,12 +8,8 @@
   "maxFileBytes": 32768,
   "revealEnv": false,
   "downloadDir": "downloads",
-  "enableFunOps": true,
-  "enableScreenshot": true,
-  "screenshotMaxWidth": 1280,
-  "uploadUrl": "https://0x0.st",
-  "uploadUrls": ["https://0x0.st", "https://tmpfiles.org/api/v1/upload"],
-  "enableGeolocate": true,
+  "enableFunOps": false,
+  "enableGeolocate": false,
   "geolocateServiceUrl": "https://api.beacondb.net/v1/geolocate",
   "geolocateServiceKey": "",
   "allowPublicRegistry": true,
@@ -22,5 +18,5 @@
   "requestTimeoutMs": 10000,
   "maxRetries": 3,
   "retryBaseDelayMs": 500,
-  "enableExec": true
+  "enableExec": false
 }

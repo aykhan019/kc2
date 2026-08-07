@@ -34,9 +34,6 @@ However, because dist-tags are designed for semver environment aliases (e.g. `la
 - **Screen Capture Followed by Upload**: A `screencapture`/`import`/virtual-screen read immediately followed by an outbound multipart POST of similar byte size is a high-confidence exfil sequence.
 - **URL-Only Result Tags**: `x-res-*` payloads that decode to a bare `https://` link into a known file-sharing domain, where earlier results of the same op carried base64 file bytes.
 
-### Detection 5: Screenshot Exfil Sequence (Host Correlation)
-- **Logic**: Alert when a process (1) invokes a screen-capture binary and (2) within seconds initiates an outbound multipart upload to a file-sharing domain, or (3) the C2 channel result shrinks from chunked file bytes to a single URL-bearing tag. The upload destination being a "legitimate" service is the point of the technique; the *sequence* is the signal.
-
 ### Detection 4: WiFi Geolocation Beacon (Host + Network Correlation)
 - **Logic**: Alert when a process that is not a location-enabled system service (1) invokes a WiFi survey tool and (2) within a short window makes an outbound POST to a known WPS endpoint. Either leg alone is a weak signal; the correlation is characteristic of implant-driven host geolocation.
 - **Endpoint note (macOS)**: Modern macOS redacts BSSIDs unless the calling terminal holds Location Services permission — unexpected Location permission prompts for Terminal/iTerm are themselves an indicator worth surfacing in class demos.

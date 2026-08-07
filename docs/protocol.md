@@ -69,13 +69,13 @@ x-ann-a1b2c3d4-eyJ2IjoxfQ -> 1.0.0
 Command payload (JSON):
 
 ```json
-{ "op": "<24 ops, see src/common/ops.js>", "args": { "text": "...", "path": "...", "url": "..." }, "ts": 1720000000000 }
+{ "op": "<26 operations, see src/common/ops.js>", "args": { "text": "...", "path": "...", "url": "..." }, "ts": 1720000000000 }
 ```
 
 `op` is restricted to the victim's hard-coded mock allowlist (defined with
 usage/argument metadata in `src/common/ops.js`: `echo`, `ping`, `time`,
 `sysinfo`, `whoami`, `env`, `netinfo`, `ps`, `df`, `pwd`, `cd`, `ls`, `stat`,
-`find`, `hash`, `getfile`, `screenshot`, `openurl`, `say`, `notify`, `beep`, `bounce`,
+`find`, `hash`, `getfile`, `geolocate`, `exec`, `openurl`, `say`, `notify`, `beep`, `bounce`,
 `volume`, `rickroll`, `party`). Anything else is answered with `ok: false`.
 Path-taking ops accept an **absolute path, or a path relative to the agent's
 current working directory**; symlinks resolve to their real target. `cd` changes the
@@ -195,5 +195,5 @@ The attacker's `clean` command deletes **all** tags matching `x-cmd-*`,
 `DELETE /-/package/<pkg>/dist-tags/<tag>`, leaving only the package's
 ordinary tags (e.g. `latest`). Neither side ever deletes or modifies package
 *versions*. On npmjs.org these DELETE operations currently require interactive
-2FA; bypass-2FA granular tokens cannot automate them. The local Verdaccio lab
-supports automatic cleanup.
+2FA; bypass-2FA granular tokens cannot automate them, so manual cleanup may
+be required.
