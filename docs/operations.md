@@ -27,19 +27,15 @@ against a public, disposable npm test package owned by the operator.
 ## Required public npm test-package deployment
 
 ```sh
-# Run these commands from the KC2 repository root.
+# Run these commands from the KC2 repository root. The KC2 repository package
+# is intentionally private and must never be published.
 npm ci
 npm login
 
-# 1. Create and publish a public, throwaway package you own at version 1.0.0.
-package_dir="$(mktemp -d)"
-(
-  cd "$package_dir"
-  npm init -y
-  npm pkg set name='@your-npm-username/kc2-lab-test' version='1.0.0' private=false
-  npm publish --access public
-)
-rm -rf "$package_dir"
+# 1. Create and publish only a minimal public, throwaway package you own.
+# This command creates a temporary directory containing package.json and a
+# short README, publishes that directory, then removes it.
+npm run publish:test-package -- --name='@your-npm-username/kc2-lab-test'
 #    The package contents must not change after this initial publish.
 
 # 2. Create a granular npm read/write token restricted to that package in your

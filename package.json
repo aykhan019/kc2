@@ -11,6 +11,7 @@
   "scripts": {
     "victim": "node src/victim/agent.js",
     "attacker": "node src/attacker/cli.js",
+    "publish:test-package": "node scripts/publish-test-package.mjs",
     "lint": "node scripts/check-source.mjs",
     "test": "node --test",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-include=src/**/*.js --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-functions=80",
