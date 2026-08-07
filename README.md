@@ -31,19 +31,19 @@ inspired by the npm-c2 research. Built for understanding C2 channel design and
 ```
                   npm Registry
              (dist-tags mailbox)
-          ┌───────────────────────┐
-          │  Package: kc2-lab-test  │
-          │                       │
-          │ latest -> 1.0.0       │
-          │ x-cmd-* -> command    │
-          │ x-res-* -> result     │
-          │ x-ann-* -> announce   │
-          └───────────────────────┘
-                 ▲           ▲
-                 │           │
-        HTTPS GET/PUT   HTTPS GET/PUT
-                 │           │
-          Attacker CLI    Victim Agent
+          ┌────────────────────────┐
+          │  Package: kc2-lab-test │
+          │                        │
+          │  latest -> 1.0.0       │
+          │  x-cmd-* -> command    │
+          │  x-res-* -> result     │
+          │  x-ann-* -> announce   │
+          └────────────────────────┘
+                 ▲            ▲
+                 │            │
+         HTTPS GET/PUT   HTTPS GET/PUT
+                 │            │
+          Attacker CLI     Victim Agent
 ```
 
 The two sides never connect to each other. The attacker **writes** command
