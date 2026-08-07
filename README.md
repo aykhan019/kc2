@@ -1,4 +1,4 @@
-# KC2 — Indirect C2 over npm dist-tags
+# KC2: Indirect C2 over npm dist-tags
 
 KC2 is an **educational research lab** demonstrating an indirect
 command-and-control (C2) architecture that uses **npm dist-tags as the
