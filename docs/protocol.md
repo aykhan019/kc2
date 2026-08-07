@@ -11,8 +11,8 @@ existing semver version** of the package. You cannot put arbitrary data in
 the value. You *can*, however, create almost arbitrary tag **names** pointing
 at an existing version. So:
 
-- every tag value in this protocol is pinned to the fixed version **`1.0.0`**
-  (the seed package has exactly this one version, never touched again);
+- every tag written by this protocol points to the fixed version **`1.0.0`**,
+  which must already exist in the mailbox package;
 - all information travels in tag **names**.
 
 ## Tag grammar
@@ -24,9 +24,11 @@ result-tag   = "x-res-" agent-id "-" seq "-" chunk "of" total "-" b64chunk
 announce-tag = "x-ann-" agent-id "-" b64payload
 
 agent-id    = 1*64( ALPHA / DIGIT / "_" )    ; no "-" allowed
-seq         = 1*DIGIT                        ; positive integer, globally allocated
-chunk/total = 1*DIGIT                        ; 1-based chunk index
+seq         = 1*DIGIT                        ; positive safe integer
+chunk       = 1*DIGIT                        ; 1-based chunk index
+total       = 1*DIGIT                        ; chunk count
 b64payload  = base64url-no-pad(JSON)         ; may itself contain "-"
+b64chunk    = 1*( ALPHA / DIGIT / "-" / "_" )
 ```
 
 Examples:
@@ -60,7 +62,7 @@ x-ann-a1b2c3d4-eyJ2IjoxfQ -> 1.0.0
   because `/` is URL-encoded by `encodeURIComponent`, which npm forbids in
   tag names. Commands that fit in one tag keep the plain single-tag form, so
   a chunk spec only ever appears on multi-tag payloads.
-- **payload** — base64url **without padding**, lowercase-safe alphabet
+- **payload** — base64url **without padding**, URL-safe alphabet
   (`A–Z a–z 0–9 - _`). Everything in a tag name survives
   `encodeURIComponent` unchanged, which npm requires.
 
@@ -72,7 +74,7 @@ Command payload (JSON):
 { "op": "<26 operations, see src/common/ops.js>", "args": { "text": "...", "path": "...", "url": "..." }, "ts": 1720000000000 }
 ```
 
-`op` is restricted to the victim's hard-coded mock allowlist (defined with
+`op` is restricted to the victim's hard-coded allowlist (defined with
 usage/argument metadata in `src/common/ops.js`: `echo`, `ping`, `time`,
 `sysinfo`, `whoami`, `env`, `netinfo`, `ps`, `df`, `pwd`, `cd`, `ls`, `stat`,
 `find`, `hash`, `getfile`, `geolocate`, `exec`, `openurl`, `say`, `notify`, `beep`, `bounce`,
@@ -86,16 +88,18 @@ returns the file as base64 in the result payload's optional `file` field
 capped at 64 MiB); `ls` is truncated at 200 entries, `find` at 100 matches
 and depth 6, `ps` at 40 rows; `ps`/`df` are unix-only; `env` lists names and
 redacts every value unless the victim operator opts in with the `revealEnv`
-config flag. The attacker CLI reassembles `getfile` results and
-saves them under `downloads/`.
+config flag. The attacker CLI reassembles `getfile` results and saves them
+under the configured `downloadDir` (default `downloads/`).
 
 The eight visible/audible desktop operations are rejected unless the victim
 operator explicitly enables `enableFunOps` on an attended lab host.
+`geolocate` and `exec` are controlled independently by `enableGeolocate` and
+`enableExec`; all three gates default to `false`.
 
 Result payload (JSON):
 
 ```json
-{ "seq": 7, "op": "ping", "ok": true, "output": "pong", "error": null, "ts": 1720000001000 }
+{ "seq": 7, "op": "ping", "ok": true, "output": "pong", "ts": 1720000001000 }
 ```
 
 `getfile` result payloads add a file object:
@@ -141,7 +145,7 @@ npm caps dist-tag names at **214 characters**. The encoder enforces this:
   `seq`; the receiver groups by `<agentId>:<seq>` and waits until all
   `total` chunks are present before reassembling.
 
-## Sequencing and exactly-once execution
+## Sequencing and at-most-once execution
 
 - Attacker state (`attacker-state.json`) records the highest issued `seq` per
   target and allocates each new command above the maximum across all targets.
@@ -163,9 +167,10 @@ npm caps dist-tag names at **214 characters**. The encoder enforces this:
   it as lost instead of waiting forever.
 - Malformed tags are logged and skipped on both sides; they never abort a
   poll cycle.
-- A victim deletes a processed direct command tag after publishing its result.
-  `task all` publishes one broadcast tag, which each victim processes once in
-  its `all` deduplication channel and leaves available for other victims.
+- A victim attempts to delete every processed direct command tag after the
+  result-publish attempt, even when publication failed. `task all` publishes
+  one broadcast tag, which each victim processes once in its `all`
+  deduplication channel and leaves available for other victims.
 - Commands published after initial baselining may execute after a later
   reconnect. There is no liveness signal, lease, or wall-clock expiry.
 
@@ -185,7 +190,7 @@ attacker                       registry (dist-tags)                    victim
    |<--------- {..., x-res-...} ------|                                  |
    | reassemble chunks, display       |                                  |
    |                                  |                                  |
-   |-- DELETE x-cmd-* / x-res-* / x-ann-* >|   (clean: only "latest" remains)  |
+   |-- DELETE x-cmd-* / x-res-* / x-ann-* >|   (clean: ordinary tags remain)   |
 ```
 
 ## Cleanup
@@ -194,6 +199,7 @@ The attacker's `clean` command deletes **all** tags matching `x-cmd-*`,
 `x-res-*`, or `x-ann-*` via authenticated
 `DELETE /-/package/<pkg>/dist-tags/<tag>`, leaving only the package's
 ordinary tags (e.g. `latest`). Neither side ever deletes or modifies package
-*versions*. On npmjs.org these DELETE operations currently require interactive
-2FA; bypass-2FA granular tokens cannot automate them, so manual cleanup may
-be required.
+*versions*. If npm challenges the write for a second factor, the raw API client
+cannot supply an OTP. A granular token permitted to bypass 2FA can perform the
+non-interactive write; otherwise use the npm CLI's interactive second-factor
+flow for manual cleanup.

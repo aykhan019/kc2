@@ -28,8 +28,8 @@
 
 The two sides never connect to each other. The registry's dist-tag metadata
 is the entire channel: the attacker **writes** command tags, the victim
-**reads** them on a polling loop and **writes** result tags back. Dist-tag
-reads are anonymous; only writes need a token.
+**reads** them on a polling loop and **writes** result tags back. Reads of a
+public package are anonymous; registry writes need a token.
 
 ## Components
 
@@ -41,9 +41,12 @@ reads are anonymous; only writes need a token.
 | config loader | `src/common/config.js` | defaults < config file < env overrides; token only from env |
 | logger | `src/common/logger.js` | leveled, timestamped, colored on TTY, optional log file |
 | victim agent | `src/victim/agent.js` | stable discovery, startup baseline, poll loop, dedup, backoff, graceful shutdown |
-| mock tasks | `src/victim/tasks.js` | handlers for the 24-op allowlist |
+| task dispatcher | `src/victim/tasks.js` | combines and gates the 26-operation allowlist |
+| system/file tasks | `src/victim/sysinfo.js`, `src/victim/files.js` | read-mostly host and filesystem operations |
+| geolocation task | `src/victim/geolocate.js` | opt-in WiFi scan and optional WPS lookup |
+| command-execution task | `src/victim/exec.js` | opt-in array-based process execution without a shell |
 | fun desktop ops | `src/victim/fun.js` | validated macOS/Linux/Windows browser, speech, notification, sound, attention, and volume adapters |
-| attacker CLI | `src/attacker/cli.js` | interactive REPL with live notifications: `agents task history poll clean stats` |
+| attacker CLI | `src/attacker/cli.js`, `src/attacker/cli-runtime.js` | interactive REPL with live notifications, direct/broadcast tasks, aliases, attachment, chains, history, polling, cleanup, and stats |
 
 ## Why dist-tags work as a channel (and versions don't)
 
@@ -98,10 +101,10 @@ uses one broadcast tag shared by every polling victim.
   leaked maintainer token, which is itself a detectable event.
 - **Rate limits / abuse controls**: npm rate-limits and monitors metadata
   writes; high-frequency tag churn on a single package is anomalous.
-- **Persistent artifacts**: npmjs.org requires interactive 2FA for sensitive
-  package-management DELETE operations. Bypass-2FA granular tokens can add
-  these tags but cannot clean them automatically, so command and result tags
-  accumulate with activity.
+- **Persistent artifacts**: command and result tags accumulate until cleanup.
+  If npm requires a second factor and the configured granular token cannot
+  bypass that requirement, this program's bearer-token API client cannot
+  complete the challenge; cleanup must then be performed interactively.
 - **No liveness or lease**: a discovered agent is only historically known.
   Commands queued after its initial baseline may execute after reconnect.
 - **No semver-safe hiding**: tag names cannot look like versions
@@ -122,22 +125,26 @@ uses one broadcast tag shared by every polling victim.
 
 ## Operational security boundaries
 
-The supported local lab runs the victim and attacker as ordinary local
-processes against a loopback-only registry, with runtime configuration that
-fails closed for public npm use and for sending a token over non-loopback
-plaintext HTTP.
+The documented lab runs the victim and attacker as ordinary local processes
+against an operator-owned, disposable public npm package. Runtime configuration
+requires an explicit opt-in for `registry.npmjs.org` and refuses to send a
+token over non-loopback plaintext HTTP unless separately overridden.
 
-Path tasks resolve both the configured root and requested target before
-enforcing containment, preventing lexical `..` and symlink escapes.
-Environment values and desktop-affecting operations require separate explicit
-opt-ins. These controls reduce accidental exposure; they do not make the
-design a secure or covert production control plane. See
+Path tasks resolve relative paths from the agent's current working directory
+and dereference symlinks, but they are **not confined to a filesystem root**.
+Run the victim as an unprivileged user in a dedicated directory. Environment
+values, geolocation, desktop effects, and array-based process execution each
+require explicit opt-ins. These controls reduce accidental exposure; they do
+not make the design a secure or covert production control plane. See
 [`operations.md`](operations.md) and [`../SECURITY.md`](../SECURITY.md).
 
 ## Threat model for the lab
 
-In scope: demonstrating the metadata channel end-to-end, with mock tasks, so
-defenders can study the artifacts it creates. Out of scope (deliberately
-absent): persistence, privilege escalation, obfuscation or encryption,
-arbitrary command execution, credential theft, targeting of any real
-package or user.
+In scope: demonstrating the metadata channel end-to-end, with a fixed task
+surface, so defenders can study the artifacts it creates. The optional `exec`
+operation deliberately demonstrates the risk of arbitrary program execution;
+it is disabled by default, uses an argument array rather than a shell, and is
+intended only for an attended lab host. Deliberately absent are persistence,
+privilege escalation, obfuscation, encryption, credential theft, screen
+capture, cloud upload, and targeting of any package or user not owned by the
+operator or explicitly authorized for the exercise.

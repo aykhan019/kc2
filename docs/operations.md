@@ -9,11 +9,15 @@ against a public, disposable npm test package owned by the operator.
 
 ## Preflight
 
-1. Use Node.js 22 or 24 LTS.
+1. Use Node.js 22 or newer (the package's declared engine range).
 2. Run `npm ci` and `npm run check`.
 3. Confirm the public npm test package is disposable, operator-owned, and not
    used for any other purpose.
-4. Use a short-lived token scoped to that single package.
+4. Use a short-lived, read/write granular token scoped to that single package.
+   Because KC2 performs non-interactive writes, the token must be allowed to
+   bypass any applicable 2FA challenge, and the package must allow token-based
+   writes. Prefer a dedicated test account/package because this weakens the
+   protection normally recommended for production packages.
 5. Set `NPM_C2_ALLOW_PUBLIC_REGISTRY=true`; keep `revealEnv`, `enableFunOps`,
    `enableGeolocate`, `enableExec`, and insecure-registry opt-ins off unless
    the exercise specifically requires them.
@@ -39,8 +43,10 @@ rm -rf "$package_dir"
 #    The package contents must not change after this initial publish.
 
 # 2. Create a granular npm read/write token restricted to that package in your
-# npm account security settings. Edit env.sh directly so the token is not put
-# into shell history.
+# npm account security settings. If npm would require 2FA for writes, enable
+# the token's Bypass 2FA capability; KC2 cannot answer an interactive OTP
+# challenge. Never use this setting for a production package. Edit env.sh
+# directly so the token is not put into shell history.
 cp env.sh.example env.sh
 chmod 600 env.sh
 ${EDITOR:-vi} env.sh
@@ -55,12 +61,12 @@ npm run victim                      # terminal 1
 npm run attacker                    # terminal 2
 ```
 
-Use a granular, short-lived npm token limited to that single package. Store
-it only in mode-600 `env.sh` or as `NPM_C2_TOKEN` for both processes. Because
-the package is public, all dist-tag payloads are readable by anyone. The
-template explicitly sets every risky capability to `false`; this overrides
-any permissive values in `config.json` unless an authorized exercise changes
-an env value to `true`.
+Use a granular, short-lived npm token limited to that single disposable
+package. Store it only in mode-600 `env.sh` or as `NPM_C2_TOKEN` for both
+processes. Because the package is public, all dist-tag payloads are readable
+by anyone. The template explicitly sets every risky capability to `false`;
+these environment values override permissive values in `config.json` unless
+an authorized exercise deliberately changes them to `true`.
 
 Runtime state lives in the working directory:
 
@@ -72,16 +78,19 @@ Runtime state lives in the working directory:
 
 State files are required for at-most-once processing and monotonically
 allocated task sequences. Back up both state files and the attacker's
-`chains.json` as one consistent set while processes are stopped. Restoring
+`chains.json` (stored beside the attacker state file) as one consistent set
+while processes are stopped. Restoring
 only one component can cause old tags to be baselined, results to be reported
 again, or sequence history to diverge. The npm package and its dist-tags are
 external state; record the package name and relevant tags before recovery.
 
 For a disposable reset, stop the victim and attacker, delete the state files,
-`chains.json`, and downloaded files, then manually remove KC2 dist-tags from
-the public test package with `npm dist-tag rm`. Keep the initial `1.0.0`
-placeholder version. This removes local state and saved chains; npm retains
-the published package version.
+the adjacent `chains.json`, and downloaded files. Run the attacker's `clean`
+command before stopping it when its token can perform the required deletes;
+otherwise remove each KC2 dist-tag with `npm dist-tag rm <package> <tag>` and
+complete npm's interactive second-factor flow if prompted. Keep the initial
+`1.0.0` placeholder version. This removes local state and saved chains; npm
+retains the published package version.
 
 ## Monitoring and failure handling
 
@@ -95,7 +104,8 @@ transient failures with exponential backoff. Configure `requestTimeoutMs`,
 | HTTP 401/403 | Revoke suspect credentials; issue a new package-scoped token. |
 | HTTP 404 | Verify the registry URL, package name, and seeded `1.0.0` version. |
 | Repeated timeout/5xx | Check registry health and network policy; do not raise retries without a bound. |
-| Incomplete results | Inspect registry write contention and tag limits; rerun only an idempotent task. |
+| Incomplete results | Inspect registry write contention and tag limits; because execution is at-most-once, rerun only a task that is safe to repeat. |
+| Cleanup rejected with 2FA/OTP challenge | Use an appropriately scoped lab token that may bypass the challenge, or remove tags interactively with `npm dist-tag rm`; never relax a production package's policy for this lab. |
 | Corrupt state | Startup fails closed. Preserve the file for analysis, then restore the matching backup or reset the disposable lab. |
 | Unexpected tasks/tags | Stop victim and attacker, revoke the token, preserve registry logs/tags, and investigate before cleanup. |
 

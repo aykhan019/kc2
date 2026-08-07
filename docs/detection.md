@@ -17,8 +17,8 @@ However, because dist-tags are designed for semver environment aliases (e.g. `la
 
 ### 2. Network & Proxy IoCs
 - **Target Endpoints**: Repeated `GET /-/package/<pkg>/dist-tags` (reads) or `PUT /-/package/<pkg>/dist-tags/<tag>` / `DELETE /-/package/<pkg>/dist-tags/<tag>` (writes).
-- **User-Agent Anomalies**: HTTP requests to registry APIs originating from non-standard User-Agents (e.g., standard `node-fetch`, generic Node.js runtime, or custom agent strings rather than official `npm/<version> node/<version> <platform>`).
-- **Periodic Beaconing**: Fixed-interval HTTP `GET` requests targeting `/-/package/*/dist-tags` from internal developer workstations or build agents.
+- **User-Agent Anomalies**: KC2 sets `KC2/1.0 (educational research)` rather than an official npm CLI User-Agent. More generally, custom Node.js clients that call registry metadata APIs directly are worth correlating with process and package context.
+- **Periodic Polling**: Repeated HTTP `GET` requests targeting `/-/package/*/dist-tags` from developer workstations or build agents. KC2 sleeps for the configured interval after a successful cycle and exponentially backs off failed cycles, so the observed cadence is near-periodic rather than perfectly fixed.
 
 ### 3. Host / Endpoint Artifacts
 - **State Files**: Creation of JSON state tracking files on disk (e.g. `victim-state.json` or `attacker-state.json`) recording sequence numbers (`lastSeq`, `nextSeq`) and generated agent identifiers (`agentId`).
@@ -26,17 +26,8 @@ However, because dist-tags are designed for semver environment aliases (e.g. `la
 
 ### 4. WiFi Positioning (Geolocation) Task Artifacts
 - **WiFi Scan Tool Invocations**: A non-system process (e.g. `node`) spawning WiFi survey utilities — `airport -s` or `system_profiler SPAirPortDataType` (macOS), `nmcli ... dev wifi list` (Linux), `netsh wlan show networks mode=bssid` (Windows). Interactive users rarely script these; implants run them to harvest BSSIDs.
-- **WPS Database Lookups**: Outbound HTTPS `POST` requests carrying a JSON body of `wifiAccessPoints`/`macAddress` entries to geolocation endpoints (`www.googleapis.com/geolocation`, `location.services.mozilla.com`, or similar) from a non-browser process. This is stage 2 of the WiFi positioning technique: BSSID list in, coordinates + accuracy out.
-- **Result Tags Containing Coordinates**: `x-res-*` tag payloads that decode to `lat=`/`lng=`/`accuracyM=` fields.
-
-### 5. Exfil-by-Reference (Cloud Upload) Task Artifacts
-- **Anonymous File-Share Uploads**: Multipart `POST` requests (`curl -F file=@...`) from a non-browser process to public no-key file-sharing or paste services (`0x0.st`, `transfer.sh`, `tmpfiles.org`, `catbox.moe`, `litterbox.catbox.moe`, …). This is the "living off trusted sites" pattern: the payload rides a reputable domain, so domain reputation scoring alone will not catch it — process/service correlation will.
-- **Screen Capture Followed by Upload**: A `screencapture`/`import`/virtual-screen read immediately followed by an outbound multipart POST of similar byte size is a high-confidence exfil sequence.
-- **URL-Only Result Tags**: `x-res-*` payloads that decode to a bare `https://` link into a known file-sharing domain, where earlier results of the same op carried base64 file bytes.
-
-### Detection 4: WiFi Geolocation Beacon (Host + Network Correlation)
-- **Logic**: Alert when a process that is not a location-enabled system service (1) invokes a WiFi survey tool and (2) within a short window makes an outbound POST to a known WPS endpoint. Either leg alone is a weak signal; the correlation is characteristic of implant-driven host geolocation.
-- **Endpoint note (macOS)**: Modern macOS redacts BSSIDs unless the calling terminal holds Location Services permission — unexpected Location permission prompts for Terminal/iTerm are themselves an indicator worth surfacing in class demos.
+- **WPS Database Lookups**: Outbound HTTPS `POST` requests made by `curl` with a `wifiAccessPoints`/`macAddress` JSON body. The example configuration uses `api.beacondb.net/v1/geolocate`; another configured MLS/Google-compatible endpoint or a loopback mock may be used instead.
+- **Result Tags Containing Coordinates**: `x-res-*` tag payloads whose decoded JSON `output` string contains `location: lat=... lng=... accuracyM=...` and a `service:` host line.
 
 ---
 
@@ -49,7 +40,11 @@ However, because dist-tags are designed for semver environment aliases (e.g. `la
 - **Logic**: Standard npm dist-tags follow simple identifiers (`latest`, `canary`, `v1.x`, `dev`). Tag names containing base64url character sets, hyphen-delimited sequence numbers, or sentinel prefixes (`x-cmd-`, `x-res-`, `x-ann-`) should trigger detection alerts.
 
 ### Detection 3: Polling Beacon Detection (Network Flow)
-- **Logic**: Compute time delta between consecutive `GET /-/package/<pkg>/dist-tags` requests per source IP. A low variance in request intervals (e.g. polling every 5.0 seconds ± 0.2s) indicates automated C2 beaconing.
+- **Logic**: Compute time deltas between consecutive `GET /-/package/<pkg>/dist-tags` requests per source and package. Alert on sustained, near-periodic access while allowing for request latency and exponential backoff after failures.
+
+### Detection 4: WiFi Geolocation (Host + Network Correlation)
+- **Logic**: Alert when a process that is not a location-enabled system service invokes a WiFi survey tool and then, within a short window, launches `curl` to POST to a WPS endpoint. Either leg alone is a weak signal; their correlation is stronger.
+- **Endpoint note (macOS)**: BSSID visibility can depend on Location Services permissions. Correlate unexpected permission prompts or grants for the launching terminal/process with the scan and network activity.
 
 ---
 
@@ -66,7 +61,7 @@ index=proxy sourcetype="access_combined" uri_path="*/-/package/*/dist-tags*"
 ### Elastic / Kibana (EQL - Endpoint & Network)
 ```eql
 sequence by host.id with maxspan=1m
-  [network where http.request.method == "GET" and http.request.body.content == "*dist-tags*" and not process.name in ("npm", "yarn", "pnpm")]
+  [network where http.request.method == "GET" and url.path like "*/-/package/*/dist-tags" and not process.name in ("npm", "yarn", "pnpm")]
   [file where file.name == "*state.json" and event.action in ("creation", "modification")]
 ```
 
@@ -80,14 +75,10 @@ logsource:
     product: webproxy
 detection:
     selection_endpoint:
-        c-uri|contains: '/-/package/'
-        c-uri|endswith: '/dist-tags'
+        c-uri|re: '/-/package/.+/dist-tags'
     selection_useragent:
         c-user-agent|contains:
-            - 'node-fetch'
-            - 'axios'
-            - 'got'
-            - 'undici'
+            - 'KC2/1.0 (educational research)'
     filter_official_npm:
         c-user-agent|startswith: 'npm/'
     condition: selection_endpoint and selection_useragent and not filter_official_npm
@@ -102,9 +93,9 @@ level: high
 
 ### Tag Name Regexes
 
-#### Command Tag Pattern (`x-cmd-<agentId>-<seq>-<base64url>`)
+#### Command Tag Pattern (single or chunked)
 ```regex
-^x-cmd-[A-Za-z0-9_]{1,64}-[0-9]+-[A-Za-z0-9_-]+$
+^x-cmd-[A-Za-z0-9_]{1,64}-[0-9]+-(?:[0-9]+of[0-9]+-)?[A-Za-z0-9_-]+$
 ```
 
 #### Result Tag Pattern (`x-res-<agentId>-<seq>-<chunk>of<total>-<base64url>`)
@@ -117,7 +108,7 @@ level: high
 ^x-ann-[A-Za-z0-9_]{1,64}-[A-Za-z0-9_-]+$
 ```
 
-### YARA Rule (Memory / Log / Network Packet Scanning)
+### YARA Rule (Memory or Decrypted Log Scanning)
 ```yara
 rule Suspicious_npm_dist_tag_C2 {
     meta:
@@ -125,7 +116,7 @@ rule Suspicious_npm_dist_tag_C2 {
         author = "KC2"
         severity = "High"
     strings:
-        $cmd_tag = /x-cmd-[A-Za-z0-9_]{1,64}-[0-9]+-[A-Za-z0-9_-]{10,}/
+        $cmd_tag = /x-cmd-[A-Za-z0-9_]{1,64}-[0-9]+-(?:[0-9]+of[0-9]+-)?[A-Za-z0-9_-]{10,}/
         $res_tag = /x-res-[A-Za-z0-9_]{1,64}-[0-9]+-[0-9]+of[0-9]+-[A-Za-z0-9_-]{10,}/
         $ann_tag = /x-ann-[A-Za-z0-9_]{1,64}-[A-Za-z0-9_-]{10,}/
     condition:
