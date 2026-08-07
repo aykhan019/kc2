@@ -1,5 +1,9 @@
 # KC2: Indirect C2 over npm dist-tags
 
+[![CI](https://github.com/aykhan019/kc2/actions/workflows/ci.yml/badge.svg)](https://github.com/aykhan019/kc2/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/node.js-22%2B-339933.svg)](https://nodejs.org/)
+
 KC2 is an **educational research lab** demonstrating an indirect
 command-and-control (C2) architecture that uses **npm dist-tags as the
 communication mailbox**,
@@ -28,7 +32,7 @@ inspired by the npm-c2 research. Built for understanding C2 channel design and
                   npm Registry
              (dist-tags mailbox)
           ┌───────────────────────┐
-          │  Package: @your-npm-username/kc2-lab-test │
+          │  Package: kc2-lab-test  │
           │                       │
           │ latest -> 1.0.0       │
           │ x-cmd-* -> command    │
