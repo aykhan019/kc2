@@ -23,22 +23,44 @@ against a public, disposable npm test package owned by the operator.
 ## Required public npm test-package deployment
 
 ```sh
+# Run these commands from the KC2 repository root.
+npm ci
+npm login
+
 # 1. Create and publish a public, throwaway package you own at version 1.0.0.
-mkdir kc2-lab-test && cd kc2-lab-test
-npm init -y
-npm pkg set name='@your-npm-username/kc2-lab-test' version='1.0.0' private=false
-npm publish --access public
-cd ..
+package_dir="$(mktemp -d)"
+(
+  cd "$package_dir"
+  npm init -y
+  npm pkg set name='@your-npm-username/kc2-lab-test' version='1.0.0' private=false
+  npm publish --access public
+)
+rm -rf "$package_dir"
 #    The package contents must not change after this initial publish.
-cp env.sh.example env.sh            # set your package name and granular token
+
+# 2. Create a granular npm read/write token restricted to that package in your
+# npm account security settings. Edit env.sh directly so the token is not put
+# into shell history.
+cp env.sh.example env.sh
 chmod 600 env.sh
+${EDITOR:-vi} env.sh
+if grep -qE 'npm_replace_me|@your-npm-username/' env.sh; then
+  echo 'Replace the package-name and token placeholders in env.sh.' >&2
+  exit 1
+fi
+
+# 3. From this repository, use separate terminals for the long-running victim
+# and interactive attacker processes.
 npm run victim                      # terminal 1
 npm run attacker                    # terminal 2
 ```
 
 Use a granular, short-lived npm token limited to that single package. Store
 it only in mode-600 `env.sh` or as `NPM_C2_TOKEN` for both processes. Because
-the package is public, all dist-tag payloads are readable by anyone.
+the package is public, all dist-tag payloads are readable by anyone. The
+template explicitly sets every risky capability to `false`; this overrides
+any permissive values in `config.json` unless an authorized exercise changes
+an env value to `true`.
 
 Runtime state lives in the working directory:
 

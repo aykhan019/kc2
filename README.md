@@ -66,26 +66,40 @@ Use a public, throwaway npm test package that you own. Do not use an existing
 or shared package: package dist-tags and their payloads are world-readable.
 
 ```sh
-# 1. Create and publish a public, disposable package at version 1.0.0 once.
-mkdir kc2-lab-test && cd kc2-lab-test
-npm init -y
-npm pkg set name='@your-npm-username/kc2-lab-test' version='1.0.0' private=false
-npm publish --access public
-cd ..
-#    The package contents are not changed after this initial publish.
+# From the KC2 repository root:
+npm ci
+npm login
 
-# 2. Create env.sh from the template and set its package name and token.
+# 1. Create and publish a public, disposable package at version 1.0.0 once.
+package_dir="$(mktemp -d)"
+(
+  cd "$package_dir"
+  npm init -y
+  npm pkg set name='@your-npm-username/kc2-lab-test' version='1.0.0' private=false
+  npm publish --access public
+)
+rm -rf "$package_dir"
+
+# 2. In your npm account security settings, create a granular read/write token
+# restricted to this package. Create env.sh, then edit its package name and token.
 cp env.sh.example env.sh
 chmod 600 env.sh
+${EDITOR:-vi} env.sh
+if grep -qE 'npm_replace_me|@your-npm-username/' env.sh; then
+  echo 'Replace the package-name and token placeholders in env.sh.' >&2
+  exit 1
+fi
 
-# 3. Start the victim agent and the interactive attacker CLI.
+# 3. Start each process from this repository in a separate terminal.
 npm run victim      # terminal 1
 npm run attacker    # terminal 2
 ```
 
 Both sides read the package-scoped token from `env.sh` or the `NPM_C2_TOKEN`
 environment variable. `env.sh.example` includes the required npm registry and
-public-registry opt-in; replace the package-name placeholder and token.
+public-registry opt-in, and explicitly disables risky capabilities so it
+overrides any permissive `config.json` values. Replace the package-name
+placeholder and token before starting either process.
 
 In the CLI:
 
