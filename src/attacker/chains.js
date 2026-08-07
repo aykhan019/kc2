@@ -23,7 +23,7 @@ import path from 'node:path';
 import { getOpDef, parseOpArgs } from '../common/ops.js';
 
 export const CHAIN_NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
-export const MAX_CHAINS = 50;
+export const MAX_CHAINS = 100;
 export const MAX_STEPS = 100;
 export const MAX_STEP_LEN = 4096; // chars of one step string (op + args)
 export const MAX_DESCRIPTION_LEN = 160;
