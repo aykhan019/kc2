@@ -131,11 +131,9 @@ test('loadConfig picks up token and overrides via env.sh (NPM_C2_ENV_FILE)', () 
 test('production safety settings are secure by default and paths resolve absolutely', () => {
   const cfg = loadConfig('/nonexistent/config.json');
   assert.equal(cfg.enableFunOps, false);
-  assert.equal(cfg.enableScreenshot, false);
   assert.equal(cfg.enableGeolocate, false);
   assert.equal(cfg.geolocateServiceUrl, '');
   assert.equal(cfg.geolocateServiceKey, '');
-  assert.equal(cfg.screenshotMaxWidth, 1280);
   assert.equal(cfg.allowPublicRegistry, false);
   assert.equal(cfg.allowInsecureHttp, false);
   assert.equal(cfg.downloadDir, path.resolve('downloads'));
@@ -159,7 +157,7 @@ test('geolocateServiceUrl must be https or loopback http, without credentials', 
   assert.equal(loadConfig(config).geolocateServiceUrl, 'http://127.0.0.1:8080/geolocate');
 });
 
-test('uploadUrl follows the same service-URL rules and defaults to off', () => {
+test.skip('removed screenshot uploadUrl setting followed service-URL rules', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-configtest-'));
   const config = path.join(dir, 'config.json');
 
@@ -176,7 +174,7 @@ test('uploadUrl follows the same service-URL rules and defaults to off', () => {
   assert.equal(loadConfig(config).uploadUrl, 'http://localhost:9999/upload');
 });
 
-test('uploadUrls is a validated ordered list of service endpoints', () => {
+test.skip('removed screenshot uploadUrls setting validated endpoint lists', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-c2-configtest-'));
   const config = path.join(dir, 'config.json');
 
@@ -236,7 +234,6 @@ test('configuration rejects placeholders, credentials in URLs, and invalid runti
     ['requestTimeoutMs', 0, /requestTimeoutMs/],
     ['maxRetries', 11, /maxRetries/],
     ['retryBaseDelayMs', 0, /retryBaseDelayMs/],
-    ['screenshotMaxWidth', 10, /screenshotMaxWidth/],
   ]) {
     fs.writeFileSync(config, JSON.stringify({ [key]: value }));
     assert.throws(() => loadConfig(config), expected);

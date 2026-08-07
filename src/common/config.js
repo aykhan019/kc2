@@ -19,14 +19,10 @@ export const DEFAULTS = Object.freeze({
   revealEnv: false, // opt-in: let the env task return real values (may expose secrets)
   downloadDir: 'downloads',
   enableFunOps: false,
-  enableScreenshot: false, // opt-in: the screenshot task captures the whole screen
-  screenshotMaxWidth: 1280, // starting width for the screenshot JPEG downscale-to-fit ladder
   enableGeolocate: false, // opt-in: the geolocate task discloses the host's coarse location
   enableExec: false, // opt-in: the exec task runs arbitrary commands on this host
   geolocateServiceUrl: '', // MLS/Google-compatible WPS endpoint; '' = WiFi-scan-only mode
   geolocateServiceKey: '', // appended as ?key= when set; keep real keys in env.sh
-  uploadUrl: '', // anonymous file-share endpoint for screenshot exfil demo; '' = channel transfer
-  uploadUrls: [], // ordered fallback list of upload endpoints; overrides/extends uploadUrl
   allowPublicRegistry: false,
   allowInsecureHttp: false,
   logLevel: 'info',
@@ -167,12 +163,6 @@ export function loadConfig(explicitPath) {
   if (process.env.NPM_C2_ENABLE_FUN_OPS !== undefined && process.env.NPM_C2_ENABLE_FUN_OPS !== '') {
     cfg.enableFunOps = parseBoolFlag(process.env.NPM_C2_ENABLE_FUN_OPS);
   }
-  if (process.env.NPM_C2_ENABLE_SCREENSHOT !== undefined && process.env.NPM_C2_ENABLE_SCREENSHOT !== '') {
-    cfg.enableScreenshot = parseBoolFlag(process.env.NPM_C2_ENABLE_SCREENSHOT);
-  }
-  if (process.env.NPM_C2_SCREENSHOT_MAX_WIDTH !== undefined && process.env.NPM_C2_SCREENSHOT_MAX_WIDTH !== '') {
-    cfg.screenshotMaxWidth = Number(process.env.NPM_C2_SCREENSHOT_MAX_WIDTH);
-  }
   if (process.env.NPM_C2_ENABLE_GEOLOCATE !== undefined && process.env.NPM_C2_ENABLE_GEOLOCATE !== '') {
     cfg.enableGeolocate = parseBoolFlag(process.env.NPM_C2_ENABLE_GEOLOCATE);
   }
@@ -184,12 +174,6 @@ export function loadConfig(explicitPath) {
   }
   if (process.env.NPM_C2_GEOLOCATE_KEY !== undefined && process.env.NPM_C2_GEOLOCATE_KEY !== '') {
     cfg.geolocateServiceKey = process.env.NPM_C2_GEOLOCATE_KEY;
-  }
-  if (process.env.NPM_C2_UPLOAD_URL !== undefined && process.env.NPM_C2_UPLOAD_URL !== '') {
-    cfg.uploadUrl = process.env.NPM_C2_UPLOAD_URL;
-  }
-  if (process.env.NPM_C2_UPLOAD_URLS !== undefined && process.env.NPM_C2_UPLOAD_URLS !== '') {
-    cfg.uploadUrls = process.env.NPM_C2_UPLOAD_URLS.split(',').map((u) => u.trim()).filter(Boolean);
   }
   if (process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY !== undefined && process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY !== '') {
     cfg.allowPublicRegistry = parseBoolFlag(process.env.NPM_C2_ALLOW_PUBLIC_REGISTRY);
@@ -241,24 +225,9 @@ export function loadConfig(explicitPath) {
   }
   cfg.revealEnv = parseBoolFlag(cfg.revealEnv);
   cfg.enableFunOps = parseBoolFlag(cfg.enableFunOps);
-  cfg.enableScreenshot = parseBoolFlag(cfg.enableScreenshot);
-  cfg.screenshotMaxWidth = Number(cfg.screenshotMaxWidth);
-  if (!Number.isInteger(cfg.screenshotMaxWidth) || cfg.screenshotMaxWidth < 160 || cfg.screenshotMaxWidth > 7680) {
-    throw new Error('screenshotMaxWidth must be an integer from 160 to 7680');
-  }
   cfg.enableGeolocate = parseBoolFlag(cfg.enableGeolocate);
   cfg.enableExec = parseBoolFlag(cfg.enableExec);
   assertServiceUrl(cfg.geolocateServiceUrl, 'geolocateServiceUrl');
-  assertServiceUrl(cfg.uploadUrl, 'uploadUrl');
-  if (!Array.isArray(cfg.uploadUrls)) {
-    throw new Error('uploadUrls must be an array of service endpoints');
-  }
-  for (const entry of cfg.uploadUrls) {
-    if (typeof entry !== 'string' || !entry) {
-      throw new Error('uploadUrls entries must be non-empty strings');
-    }
-    assertServiceUrl(entry, 'uploadUrls entry');
-  }
   cfg.allowPublicRegistry = parseBoolFlag(cfg.allowPublicRegistry);
   cfg.allowInsecureHttp = parseBoolFlag(cfg.allowInsecureHttp);
   cfg.downloadDir = path.resolve(String(cfg.downloadDir));

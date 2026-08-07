@@ -22,7 +22,7 @@ test('allowlist contains exactly the documented ops', () => {
     [
       'beep', 'bounce', 'cd', 'df', 'echo', 'env', 'exec', 'find', 'geolocate', 'getfile', 'hash', 'ls',
       'netinfo', 'notify', 'openurl', 'party', 'ping', 'ps', 'pwd', 'rickroll',
-      'say', 'screenshot', 'stat', 'sysinfo', 'time', 'volume', 'whoami',
+      'say', 'stat', 'sysinfo', 'time', 'volume', 'whoami',
     ],
   );
 });
@@ -32,10 +32,7 @@ test('fun ops are categorized for help output', () => {
     OP_DEFS.filter((op) => op.group === 'fun').map((op) => op.name),
     ['openurl', 'say', 'notify', 'beep', 'bounce', 'volume', 'rickroll', 'party'],
   );
-  assert.deepEqual(
-    OP_DEFS.filter((op) => op.group === 'screen').map((op) => op.name),
-    ['screenshot'],
-  );
+  assert.equal(OP_DEFS.some((op) => op.group === 'screen'), false);
   assert.equal(OP_DEFS.find((op) => op.name === 'geolocate')?.group, 'system');
 });
 
@@ -189,7 +186,7 @@ function fakeShotRuntime(platform, { failTools = false } = {}) {
   };
 }
 
-test('screenshot is disabled unless enableScreenshot is set', () => {
+test.skip('removed screenshot task was disabled unless enableScreenshot is set', () => {
   for (const limits of [{}, { enableScreenshot: false }]) {
     const r = runTask('screenshot', {}, limits);
     assert.equal(r.ok, false);
@@ -197,7 +194,7 @@ test('screenshot is disabled unless enableScreenshot is set', () => {
   }
 });
 
-test('screenshot captures per-OS and transfers the PNG like getfile', () => {
+test.skip('removed screenshot task captured per-OS and transferred the PNG like getfile', () => {
   for (const platform of ['darwin', 'linux', 'win32']) {
     const runtime = fakeShotRuntime(platform);
     const r = runTask('screenshot', {}, runtime);
@@ -215,7 +212,7 @@ test('screenshot captures per-OS and transfers the PNG like getfile', () => {
   }
 });
 
-test('screenshot walks the downscale ladder when the PNG exceeds the cap, and reports missing tools', () => {
+test.skip('removed screenshot task walked the downscale ladder when the PNG exceeded the cap', () => {
   // The fake "resizer" writes the same 8 bytes for every tool, so the ladder
   // exhausts and the task reports the floor failure.
   const small = { ...fakeShotRuntime('darwin'), maxFileBytes: 4 };
@@ -231,7 +228,7 @@ test('screenshot walks the downscale ladder when the PNG exceeds the cap, and re
   assert.equal(none.calls.length, 5); // x11-first by default: import, scrot, gnome-screenshot, spectacle, grim
 });
 
-test('screenshot orders candidates by session type and skips silent no-writes (Wayland)', () => {
+test.skip('removed screenshot task ordered candidates by session type', () => {
   const calls = [];
   const runtime = {
     platform: 'linux',
@@ -292,7 +289,7 @@ function fakeScaledShot(platform, { pngBytes = 60_000, jpegBytesForWidth = () =>
   };
 }
 
-test('screenshot downscales to a fitting JPEG with the per-OS resizer', () => {
+test.skip('removed screenshot task downscaled to a fitting JPEG', () => {
   const expected = { darwin: 'sips', linux: 'convert', win32: 'powershell.exe' };
   for (const platform of ['darwin', 'linux', 'win32']) {
     const runtime = fakeScaledShot(platform);
@@ -305,7 +302,7 @@ test('screenshot downscales to a fitting JPEG with the per-OS resizer', () => {
   }
 });
 
-test('screenshot walks the width ladder until the JPEG fits', () => {
+test.skip('removed screenshot task walked the width ladder', () => {
   const runtime = fakeScaledShot('darwin', { jpegBytesForWidth: (w) => w * 40 });
   // 1280px -> 51200 (too big), 960px -> 38400 (too big), 640px -> 25600 (fits)
   const r = runTask('screenshot', {}, runtime);
@@ -315,14 +312,14 @@ test('screenshot walks the width ladder until the JPEG fits', () => {
   assert.deepEqual(sipsCalls.map((c) => c.args[1]), ['1280', '960', '640']);
 });
 
-test('screenshot fails clearly when even the floor exceeds the cap', () => {
+test.skip('removed screenshot task reported cap failures', () => {
   const runtime = fakeScaledShot('linux', { jpegBytesForWidth: () => 40_000 });
   const r = runTask('screenshot', {}, runtime);
   assert.equal(r.ok, false);
   assert.match(r.error, /does not fit the 32768 byte cap even as a 240px JPEG/);
 });
 
-test('screenshot honors and validates a per-task width override', () => {
+test.skip('removed screenshot task honored width overrides', () => {
   const runtime = fakeScaledShot('darwin');
   const r = runTask('screenshot', { width: 480 }, runtime);
   assert.equal(r.ok, true, r.error ?? '');
@@ -358,7 +355,7 @@ function fakeUploadShot(services) {
   return runtime;
 }
 
-test('screenshot uploads full-res and returns just the URL when upload services are set', () => {
+test.skip('removed screenshot task uploaded full-res images', () => {
   for (const body of ['https://0x0.st/abc123.png\n', '{"success":true,"link":"https://file.io/xyz789"}']) {
     const runtime = fakeUploadShot({ 'https://0x0.st': body });
     const r = runTask('screenshot', {}, runtime);
@@ -375,7 +372,7 @@ test('screenshot uploads full-res and returns just the URL when upload services 
   }
 });
 
-test('screenshot tries upload services in order until one succeeds', () => {
+test.skip('removed screenshot task retried upload services', () => {
   const runtime = fakeUploadShot({
     'https://0x0.st': null, // down
     'https://tmpfiles.org/api/v1/upload': '{"status":"success","data":{"url":"https://tmpfiles.org/dl/42/shot.png"}}',
@@ -390,7 +387,7 @@ test('screenshot tries upload services in order until one succeeds', () => {
   assert.equal(curls[0].args.at(-1), 'https://0x0.st');
 });
 
-test('screenshot still honors the legacy single uploadUrl setting', () => {
+test.skip('removed screenshot task honored legacy uploadUrl', () => {
   const runtime = fakeUploadShot({ 'https://0x0.st': 'https://0x0.st/abc123.png\n' });
   delete runtime.uploadUrls;
   runtime.uploadUrl = 'https://0x0.st';
@@ -400,7 +397,7 @@ test('screenshot still honors the legacy single uploadUrl setting', () => {
   assert.match(r.output, /https:\/\/0x0\.st\//);
 });
 
-test('screenshot falls back to channel transfer when every upload service fails', () => {
+test.skip('removed screenshot task fell back to channel transfer', () => {
   const runtime = fakeUploadShot({
     'https://0x0.st': null,
     'https://tmpfiles.org/api/v1/upload': null,
@@ -413,7 +410,7 @@ test('screenshot falls back to channel transfer when every upload service fails'
   assert.match(r.output, /fell back to channel transfer/);
 });
 
-test('screenshot falls back when the upload response has no usable URL', () => {
+test.skip('removed screenshot task fell back on invalid upload responses', () => {
   const runtime = fakeUploadShot({ 'https://0x0.st': '{"success":false,"error":"banned filetype"}' });
   const r = runTask('screenshot', {}, runtime);
   assert.equal(r.ok, true, r.error ?? '');

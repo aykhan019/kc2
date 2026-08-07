@@ -109,11 +109,8 @@ test('startup report presents grouped victim configuration without the token', (
     maxFileBytes: 32_768,
     revealEnv: false,
     enableFunOps: true,
-    enableScreenshot: false,
     enableGeolocate: false,
     enableExec: false,
-    uploadUrl: '',
-    uploadUrls: [],
     logLevel: 'info',
     logFile: '',
   }, '/tmp/victim-state.json', AGENT, '/workspace');
@@ -127,8 +124,7 @@ test('startup report presents grouped victim configuration without the token', (
     }],
     ['info', '  workspace', { cwd: '/workspace', maxFileBytes: 32_768 }],
     ['info', '  task controls', {
-      revealEnv: false, funOps: true, screenshot: false, geolocate: false, exec: false,
-      uploadEndpoints: 0,
+      revealEnv: false, funOps: true, geolocate: false, exec: false,
     }],
     ['info', '  logging', { level: 'info', file: 'disabled' }],
     ['info', 'victim agent ready; polling for new commands (Ctrl-C to stop)'],
