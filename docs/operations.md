@@ -4,34 +4,41 @@
 
 "Production ready" here means repeatable and safely operated as an authorized
 research lab. It does not mean suitable for persistence, covert access, or
-control of third-party systems. Local processes against a local verdaccio
-registry are the supported default.
+control of third-party systems. The required workflow uses local processes
+against a public, disposable npm test package owned by the operator.
 
 ## Preflight
 
 1. Use Node.js 22 or 24 LTS.
 2. Run `npm ci` and `npm run check`.
-3. Confirm the package and registry are disposable and operator-owned.
+3. Confirm the public npm test package is disposable, operator-owned, and not
+   used for any other purpose.
 4. Use a short-lived token scoped to that single package.
-5. Keep `revealEnv`, `enableFunOps`, and public/insecure
-   registry opt-ins off unless the exercise specifically requires them.
+5. Set `NPM_C2_ALLOW_PUBLIC_REGISTRY=true`; keep `revealEnv`, `enableFunOps`,
+   `enableGeolocate`, `enableExec`, and insecure-registry opt-ins off unless
+   the exercise specifically requires them.
 6. Run the victim in a dedicated directory containing only lab data; path
    operations are not confined to a filesystem root.
 
-## Supported local deployment
+## Required public npm test-package deployment
 
 ```sh
-npx verdaccio &                     # local registry on 127.0.0.1:4873
-sh scripts/setup-registry.sh        # creates user, publishes my-package@1.0.0
+# 1. Create and publish a public, throwaway package you own at version 1.0.0.
+mkdir kc2-lab-test && cd kc2-lab-test
+npm init -y
+npm pkg set name='@your-npm-username/kc2-lab-test' version='1.0.0' private=false
+npm publish --access public
+cd ..
+#    The package contents must not change after this initial publish.
+cp env.sh.example env.sh            # set your package name and granular token
+chmod 600 env.sh
 npm run victim                      # terminal 1
 npm run attacker                    # terminal 2
 ```
 
-Run verdaccio bound to loopback only, with its default config and a dedicated
-storage directory. The seed script generates a random lab password when
-`LAB_PASS` is not supplied and writes the bearer token to `./.lab-token`
-(mode 600, git-ignored); put it in `env.sh` or export it as `NPM_C2_TOKEN` for
-both processes.
+Use a granular, short-lived npm token limited to that single package. Store
+it only in mode-600 `env.sh` or as `NPM_C2_TOKEN` for both processes. Because
+the package is public, all dist-tag payloads are readable by anyone.
 
 Runtime state lives in the working directory:
 
@@ -42,17 +49,17 @@ Runtime state lives in the working directory:
 ## State, backup, and restore
 
 State files are required for at-most-once processing and monotonically
-allocated task sequences. Back up the verdaccio storage directory, both
-state files, and the attacker's `chains.json` as one consistent set while
-processes are stopped. Restoring only
-one component can cause old tags to be baselined, results to be reported
-again, or sequence history to diverge.
+allocated task sequences. Back up both state files and the attacker's
+`chains.json` as one consistent set while processes are stopped. Restoring
+only one component can cause old tags to be baselined, results to be reported
+again, or sequence history to diverge. The npm package and its dist-tags are
+external state; record the package name and relevant tags before recovery.
 
-For a disposable reset, stop the victim, attacker, and verdaccio, then delete
-the state files, `chains.json`, `.lab-token`, and the verdaccio storage directory, and re-run
-`sh scripts/setup-registry.sh`. This permanently removes registry data, state,
-saved chains,
-the local token, and downloaded files.
+For a disposable reset, stop the victim and attacker, delete the state files,
+`chains.json`, and downloaded files, then manually remove KC2 dist-tags from
+the public test package with `npm dist-tag rm`. Keep the initial `1.0.0`
+placeholder version. This removes local state and saved chains; npm retains
+the published package version.
 
 ## Monitoring and failure handling
 
@@ -73,13 +80,15 @@ transient failures with exponential backoff. Configure `requestTimeoutMs`,
 ## Upgrade and rollback
 
 1. Stop the attacker and victim.
-2. Back up the registry storage and both state files together.
+2. Back up both state files and `chains.json`; record the public package name
+   and export or record its current dist-tags.
 3. Review protocol, configuration, and state-schema changes.
 4. Run CI checks against the candidate revision.
-5. Start the registry and victim, then the attacker, and verify one `ping`.
+5. Start the victim, then the attacker, and verify one `ping`.
 
-Rollback uses the prior revision and the matching pre-upgrade backup. Do not
-mix restored state with a newer registry snapshot.
+Rollback uses the prior revision and the matching pre-upgrade local-state
+backup. Do not restore old local state against an unrecorded or unexpectedly
+changed set of public-package dist-tags.
 
 ## Release checklist
 

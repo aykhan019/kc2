@@ -195,5 +195,5 @@ The attacker's `clean` command deletes **all** tags matching `x-cmd-*`,
 `DELETE /-/package/<pkg>/dist-tags/<tag>`, leaving only the package's
 ordinary tags (e.g. `latest`). Neither side ever deletes or modifies package
 *versions*. On npmjs.org these DELETE operations currently require interactive
-2FA; bypass-2FA granular tokens cannot automate them. The local Verdaccio lab
-supports automatic cleanup.
+2FA; bypass-2FA granular tokens cannot automate them, so manual cleanup may
+be required.
